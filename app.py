@@ -21,6 +21,7 @@ from src.config import (
     RUTA_AGENTE_RL, RUTA_MUN_FEATURES, RUTA_ICONO, RUTA_LOGO, RUTA_MODELO, RUTA_MUNICIPIOS, RUTA_PANEL, RUTA_SISMOS_LIMPIO,
     UMBRAL_ALTO, UMBRAL_MEDIO, VARIABLES, VARS_SISMICAS, VARS_TERRITORIALES,
 )
+from src.asistente import AYUDA, Contexto, responder
 from src.decision import ACCIONES, recomendar, resumen as resumen_decision
 from src.ficha import generar_ficha
 from src.model_training import entrenar, explicar, predecir
@@ -589,6 +590,48 @@ if vista == V_DEC:
         k3.metric("Mayor Índice de Riesgo Integral", iri.iloc[0]["municipio"], f"{iri.iloc[0]['iri']:.0f}/100", delta_color="off")
         k4.metric("Último sismo del catálogo", f"{dec['fin']:%d-%m-%Y}")
         st.caption(f"Actividad reciente: {dec['fuente']}. Se actualiza sola cada hora si hay internet.")
+
+        st.markdown("### 💬 Pregúntale al asistente de decisión")
+        st.caption("Responde con los datos de esta plataforma (no inventa cifras). Elige una sugerencia o escribe tu pregunta abajo.")
+        res_chat, _ = cargar_proyeccion()
+        tabla_grupos, _, _ = cargar_agrupamiento(3)
+        ctx_chat = Contexto(
+            tabla=tabla, reco=reco, proy=res_chat["proy"] if res_chat else None,
+            rf=predecir_todos(artefacto, actual).set_index("municipio")["riesgo"].to_dict() if artefacto else {},
+            grupos=dict(zip(tabla_grupos["municipio"], tabla_grupos["grupo"])) if tabla_grupos is not None else {},
+            anio_ini=ANIO_ACTUAL + 1, anio_fin=ANIO_PROYECCION, anio_siguiente=ANIO_ACTUAL + 1)
+        if "chat" not in st.session_state:
+            st.session_state.chat = [{"role": "assistant", "texto": "Hola 👋 Soy el asistente de decisión de Sismo-Risk Santander.\n\n" + AYUDA, "tabla": None}]
+        sugerencias = {"¿Dónde actuar primero?": "¿Dónde actuar primero?",
+                       "Bucaramanga vs Girón": "Compara Bucaramanga con Girón",
+                       "¿Quién está en alerta?": "¿Qué municipios están en alerta?",
+                       "Plan con 50 unidades": "¿Qué evaluaría con 50 unidades de presupuesto?",
+                       "¿Cómo se calcula el IRI?": "¿Cómo se calcula el índice?"}
+        pregunta = None
+        for col_s, (etiqueta, texto_p) in zip(st.columns(len(sugerencias)), sugerencias.items()):
+            if col_s.button(etiqueta, key=f"sug_{etiqueta}", width="stretch"):
+                pregunta = texto_p
+        historial = st.container(height=430)
+        escrita = st.chat_input("Escribe tu pregunta, por ejemplo: ¿qué hago en Villanueva?", key="chat_entrada")
+        pregunta = pregunta or escrita
+        if pregunta:
+            st.session_state.chat.append({"role": "user", "texto": pregunta, "tabla": None})
+            try:
+                r_chat = responder(pregunta, ctx_chat)
+            except Exception as exc:  # el asistente nunca debe tumbar la app
+                r_chat = {"texto": f"No pude responder esa pregunta ({type(exc).__name__}). Intenta reformularla.", "tabla": None}
+            st.session_state.chat.append({"role": "assistant", "texto": r_chat["texto"], "tabla": r_chat["tabla"]})
+        with historial:
+            for msg in st.session_state.chat:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["texto"])
+                    if msg["tabla"] is not None:
+                        st.dataframe(msg["tabla"], hide_index=True, width="stretch")
+        if len(st.session_state.chat) > 1 and st.button("🧹 Limpiar conversación"):
+            st.session_state.pop("chat")
+            st.rerun()
+        st.divider()
+
 
         st.markdown("**Plan de acción y por qué se recomienda**")
         iconos = {1: "🔴", 2: "🟠", 3: "🟡"}

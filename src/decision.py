@@ -29,6 +29,10 @@ def _miles(n: float) -> str:
     return f"{int(round(n)):,}".replace(",", ".")  # formato colombiano: 617.659
 
 
+def _d(x: float, nd: int = 1) -> str:
+    return f"{float(x):.{nd}f}".replace(".", ",")  # decimal colombiano: 0,26
+
+
 def recomendar(tabla: pd.DataFrame, presupuesto: float = PRESUPUESTO) -> pd.DataFrame:
     """`tabla` trae IRI, nivel, semáforo, población, PGA, vulnerabilidad, actividad de 12 meses, área y distancia a Bucaramanga."""
     t = tabla.copy()
@@ -43,8 +47,8 @@ def recomendar(tabla: pd.DataFrame, presupuesto: float = PRESUPUESTO) -> pd.Data
 
     def porque(f):
         base = (f"Nivel {f['nivel']} (IRI {f['iri']:.0f}/100, puesto {int(f['ranking'])} de {len(t)}): viven {_miles(f['poblacion'])} personas "
-                f"({f['poblacion'] / total_pob:.1%} de Santander), PGA esperado {f['PGA_medio']:.2f} g y vulnerabilidad del sitio {f['vulnerabilidad']:.2f}. "
-                f"En los últimos 12 meses registró {int(f['observados_12m'])} sismos M≥4 frente a {f['esperados_12m']:.1f} esperados ({f['semaforo']}).")
+                f"({_d(100 * f['poblacion'] / total_pob)} % de Santander), PGA esperado {_d(f['PGA_medio'], 2)} g y vulnerabilidad del sitio {_d(f['vulnerabilidad'], 2)}. "
+                f"En los últimos 12 meses registró {int(f['observados_12m'])} sismos M≥4 frente a {_d(f['esperados_12m'])} esperados ({f['semaforo']}).")
         return base
 
     def accion(f):
@@ -85,5 +89,5 @@ def resumen(reco: pd.DataFrame) -> str:
         partes.append(f"**vigilar** {n[3]} con actividad inusual ({', '.join(reco[reco['prioridad'] == 3]['municipio'].head(3))})")
     texto = "Se recomienda " + ", ".join(partes) + "." if partes else "No hay municipios que requieran acciones extraordinarias."
     texto += (f" Con el presupuesto simulado de {reco.attrs['presupuesto']:.0f} unidades se puede evaluar a {len(plan)} municipios "
-              f"({_miles(cubierta)} habitantes, {cubierta / reco.attrs['poblacion_total']:.0%} de Santander), en ese orden de prioridad.")
+              f"({_miles(cubierta)} habitantes, {_d(100 * cubierta / reco.attrs['poblacion_total'], 0)} % de Santander), en ese orden de prioridad.")
     return texto

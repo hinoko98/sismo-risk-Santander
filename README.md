@@ -14,7 +14,7 @@ La carpeta `data/` incluye los datos ya descargados (catálogo sísmico hasta oc
 ## Secciones de la app
 | Sección | Qué muestra |
 |---|---|
-| 🧭 Centro de decisión | Decisión recomendada por municipio **con su evidencia**, Índice de Riesgo Integral, semáforo de actividad de los últimos 12 meses, ranking, ficha municipal descargable |
+| 🧭 Centro de decisión | Decisión recomendada por municipio **con su evidencia**, **asistente conversacional**, Índice de Riesgo Integral, semáforo de actividad de los últimos 12 meses, ranking, ficha municipal descargable |
 | 📊 Exploración (EDA) | KPIs, gráficos, dataset limpio y fuentes |
 | 🗺️ Mapa de riesgo | Riesgo esperado por municipio (Random Forest) o grupo (K-Means), mapa de calor y mayores sismos |
 | 🎯 Supervisado | Random Forest, métricas contra líneas base, explicación de cada predicción |
@@ -28,7 +28,7 @@ La carpeta `data/` incluye los datos ya descargados (catálogo sísmico hasta oc
 | Básico · supervisado | `src/data_processing.py`, `src/model_training.py` | ETL con geopandas, imputación, panel municipio-año (29 variables), Random Forest (`class_weight='balanced'`, One-Hot, split temporal, CV de series de tiempo) |
 | Medio · no supervisado | `src/unsupervised.py` | K-Means (k configurable) + PCA sobre 21 variables agregadas por municipio |
 | Avanzado · refuerzo | `src/reinforcement.py` | Q-learning; el estado usa actividad, población, costo, presupuesto, amenaza (PGA) y el grupo del K-Means |
-| Diferenciador | `src/riesgo_integral.py`, `src/decision.py`, `src/monitor.py`, `src/ficha.py` | Índice de Riesgo Integral, reglas de decisión auditables, monitor de actividad y ficha municipal |
+| Diferenciador | `src/riesgo_integral.py`, `src/decision.py`, `src/asistente.py`, `src/monitor.py`, `src/ficha.py` | Índice de Riesgo Integral, reglas de decisión auditables, monitor de actividad y ficha municipal |
 | Proyección | `src/proyeccion.py` | Poisson por municipio (tasas 2016–2025) y prueba retrospectiva (tasas 2008–2017 contra lo ocurrido en 2018–2025) |
 
 ## Etiqueta (reproducible y sin fuga de datos)
@@ -56,3 +56,4 @@ No se usa ninguna otra base sísmica: el USGS se retiró del proyecto porque el 
 - El costo y la escala de beneficio del agente de refuerzo son **simulados** (unidades relativas).
 - **Proyección:** extrapolación de tasas (Poisson estacionario), no una predicción de eventos. El SGC reportaba magnitudes más altas antes de 2008, por eso λ usa solo años recientes.
 - **Navegación:** la app muestra una sección a la vez (no `st.tabs`) para que los mapas se dibujen bien.
+- **Asistente del Centro de decisión:** reconoce la intención de la pregunta (ranking, comparación, perfil de un municipio, alertas, plan con presupuesto, método) y responde solo con los datos calculados; no es un modelo generativo, por lo que funciona sin internet y no inventa cifras.

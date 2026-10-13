@@ -17,6 +17,7 @@ La carpeta `data/` incluye los datos ya descargados. Si falta algo, la app lo re
 | Básico · supervisado | `src/data_processing.py`, `src/model_training.py` | ETL con geopandas, imputación, panel municipio-año, Random Forest (`class_weight='balanced'`, One-Hot, split temporal 80/20, CV de series de tiempo) |
 | Medio · no supervisado | `src/unsupervised.py` | K-Means (k configurable) + PCA sobre 22 variables agregadas por municipio |
 | Avanzado · refuerzo | `src/reinforcement.py` | Q-learning: priorizar evaluaciones municipales con presupuesto limitado |
+| Centro de decisión (diferenciador) | `src/riesgo_integral.py`, `src/monitor.py`, `src/ficha.py` | Índice de Riesgo Integral, monitor de actividad reciente con USGS en vivo, IA explicable y ficha municipal descargable |
 | Proyección a 2027 | `src/proyeccion.py` | Probabilidad por municipio con modelo de Poisson (tasas 2008–2017) y validación con sismos reales del USGS 2019–2025 |
 
 ## Etiqueta (reproducible y sin fuga de datos)
@@ -42,3 +43,10 @@ Unidad: **municipio-año**. Las variables de entrada usan información hasta el 
 - El costo y la escala de beneficio del agente de refuerzo son **simulados** (unidades relativas).
 - **Navegación:** la app muestra una sección a la vez (no `st.tabs`) para que los mapas se dibujen bien.
 - **Proyección a 2027:** es una extrapolación de tasas (Poisson estacionario), no una predicción de eventos. El SGC reportaba magnitudes más altas antes de 2008, por eso λ usa solo 2008–2017. En la validación (USGS 2019–2025) el total departamental coincide (337 observados vs 302 esperados), pero la distribución por municipio es sensible a la agencia: el USGS ubica parte del Nido de Bucaramanga en Aratoca/Piedecuesta y el SGC en Los Santos.
+
+## Lo diferenciador: Centro de decisión
+- **Índice de Riesgo Integral (IRI):** amenaza (PGA oficial del SGC) × población expuesta (DANE) × vulnerabilidad del terreno. Convierte la predicción en una lista de dónde actuar primero. Es relativo, con pesos propuestos por el equipo.
+- **Monitor de actividad reciente:** el catálogo del SGC se detiene en 2018; se complementa con el USGS en vivo y se compara, municipio por municipio, lo ocurrido en 12 meses con lo normal (cola de Poisson). Es una señal estadística, no un pronóstico.
+- **IA explicable:** cada predicción muestra cuánto empuja cada variable la probabilidad de riesgo Alto (en puntos porcentuales).
+- **Ficha municipal** en HTML (imprimible a PDF) y **ranking en CSV** para gestores.
+- El IRI usa el PGA y no el conteo de epicentros porque casi todos los M≥4 de Santander pertenecen al Nido de Bucaramanga (~150 km de profundidad) y sacuden también a los municipios vecinos.

@@ -111,6 +111,30 @@ def predecir(artefacto: dict, fila: dict) -> tuple[int, dict[int, float]]:
     return clase, probs
 
 
+def explicar(artefacto: dict, fila: dict, referencia: pd.DataFrame, clase: int = 3, top: int = 8) -> pd.DataFrame:
+    """IA explicable por sustitución: ¿cuánto cambia la probabilidad de la clase si cada variable tomara un valor típico?
+
+    Para cada variable se reemplaza su valor por la mediana (o la moda, si es categórica) de `referencia` y se mide
+    la caída o subida de P(clase). Contribución > 0 = esa variable empuja el riesgo hacia arriba respecto de lo normal.
+    No necesita librerías extra y se interpreta directamente en puntos porcentuales.
+    """
+    variables = artefacto["variables"]
+    modelo = artefacto["modelo"]
+    ref = {v: (referencia[v].mode().iloc[0] if v == COL_CATEGORICA else float(referencia[v].median())) for v in variables}
+    base = pd.DataFrame([{v: fila[v] for v in variables}])
+    variantes = pd.concat([base] * len(variables), ignore_index=True)
+    for i, v in enumerate(variables):
+        variantes.loc[i, v] = ref[v]
+    col = list(modelo.classes_).index(clase)
+    p0 = float(modelo.predict_proba(base)[0, col])
+    p = modelo.predict_proba(variantes)[:, col]
+    out = pd.DataFrame({"variable": variables, "valor": [fila[v] for v in variables],
+                        "valor_tipico": [ref[v] for v in variables], "contribucion": p0 - p})
+    out = out.reindex(out["contribucion"].abs().sort_values(ascending=False).index).head(top)
+    out.attrs["probabilidad"] = p0
+    return out.reset_index(drop=True)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     import pandas as _pd

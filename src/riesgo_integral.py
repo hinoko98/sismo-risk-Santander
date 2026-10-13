@@ -20,7 +20,8 @@ import pandas as pd
 def calcular_iri(feats: pd.DataFrame) -> pd.DataFrame:
     """Devuelve una fila por municipio con componentes, IRI (0–100), nivel relativo y ranking."""
     d = feats[["municipio", "poblacion", "area_km2", "PGA_medio", "pct_suelo_blando", "pendiente_media",
-               "latitud", "longitud"]].copy()
+               "latitud", "longitud", "distancia_bucaramanga_km"]].copy()
+    d["poblacion"] = d["poblacion"].round().astype("int64")  # habitantes enteros (sin decimales)
     d["amenaza"] = d["PGA_medio"] / d["PGA_medio"].max()
     d["exposicion"] = np.log10(d["poblacion"]) / np.log10(d["poblacion"].max())
     pend = (d["pendiente_media"] / d["pendiente_media"].max()).clip(0, 1)

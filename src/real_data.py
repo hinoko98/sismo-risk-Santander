@@ -1,7 +1,8 @@
 """Descarga de datos REALES (sin simulación) desde fuentes oficiales y abiertas.
 
 Fuentes:
-  * SGC  – Catálogo sísmico, Consulta Experta (magnitud, profundidad, RMS, GAP, fases).
+  * SGC  – Catálogo sísmico: Consulta Experta (1993-2017) y su sucesor SeisComP (2018-hoy), con magnitud,
+           profundidad, RMS, GAP, fases y errores de localización.
            https://bdrsnc.sgc.gov.co/paginas1/catalogo/Consulta_Experta/consultaexperta_2.php
   * SGC  – Amenaza sísmica de Colombia 2020 (PGA, periodo de retorno 475 años, en roca).
            https://amenazasismica.sgc.gov.co/
@@ -33,7 +34,7 @@ from scipy.spatial import cKDTree
 from shapely.geometry import Point
 
 from .config import (
-    BBOX_SANTANDER, DIR_DATOS, RUTA_MUNICIPIOS, RUTA_USGS, RUTA_POLIGONO_IGAC, RUTA_SISMOS_BRUTO, RUTA_SITIOS,
+    BBOX_SANTANDER, DIR_DATOS, RUTA_MUNICIPIOS, RUTA_POLIGONO_IGAC, RUTA_SISMOS_BRUTO, RUTA_SITIOS,
 )
 
 log = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ URL_OVERPASS = [  # servidores espejo: el público principal se satura con frecu
 ]
 URL_ELEVACION = "https://api.opentopodata.org/v1/srtm90m"
 
-ANIO_INI, ANIO_FIN = 1993, 2018  # rango con datos en la Consulta Experta (2019+ devuelve 0 registros)
+ANIO_INI = 1993  # primer año del catálogo SGC
 ANIO_POBLACION = 2025
 
 
@@ -155,42 +156,121 @@ def _descargar_anio_sgc(anio: int) -> pd.DataFrame:
     return df
 
 
-def descargar_catalogo_sgc() -> pd.DataFrame:
-    """Catálogo SGC 1993-2018 para el bounding box de Santander -> data/sismos_SGC.csv."""
-    DIR_RAW.mkdir(parents=True, exist_ok=True)
-    partes = []
-    for anio in range(ANIO_INI, ANIO_FIN + 1):
-        d = _descargar_anio_sgc(anio)
-        log.info("SGC %d: %d eventos", anio, len(d))
-        if len(d):
-            partes.append(d)
-    df = pd.concat(partes, ignore_index=True)
-    df = df.rename(columns={
-        "FECHA": "fecha", "HORA_UTC": "hora_utc", "LATITUD (grados)": "latitud",
-        "LONGITUD (grados)": "longitud", "PROFUNDIDAD (Km)": "profundidad_km",
-        "MAGNITUD Ml": "magnitud_ml", "MAGNITUD Mw": "magnitud_mw", "DEPARTAMENTO": "departamento",
-        "MUNICIPIO": "municipio", "# FASES": "fases_asociadas", "RMS (Seg)": "rms",
-        "GAP (grados)": "gap_azimutal", "ESTADO": "estado",
-    }).drop(columns=["ERROR LATITUD (Km)", "ERROR LONGITUD (Km)", "ERROR PROFUNDIDAD (Km)"], errors="ignore")
-    for c in ["latitud", "longitud", "profundidad_km", "magnitud_ml", "magnitud_mw", "fases_asociadas", "rms", "gap_azimutal"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df.to_csv(RUTA_SISMOS_BRUTO, index=False)
+# ------------------------------------------------------------------ 1b. Catálogo SGC SeisComP (2018 en adelante)
+URL_SGC_SC = "https://bdrsnc.sgc.gov.co/paginas1/catalogo/Consulta_Experta_Seiscomp/consulta_sismo.php"
+ANIO_INI_SEISCOMP = 2018  # hasta 2017 se usa la Consulta Experta; ambos catálogos son del SGC y coinciden en volumen en 2017
+COLS_SC = ["fecha_hora", "latitud", "longitud", "profundidad_km", "magnitud", "tipo_magnitud", "fases_asociadas", "rms",
+           "gap_azimutal", "error_lat_km", "error_lon_km", "error_prof_km", "region", "estado"]
+_RE_FILA = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S)
+_RE_CELDA = re.compile(r"<td[^>]*>(.*?)</td>", re.S)
+_RE_FECHA = re.compile(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
+_RE_TAG = re.compile(r"<[^>]+>")
+
+
+def _parsear_seiscomp(html: str) -> pd.DataFrame:
+    """Extrae las filas de eventos de la tabla HTML de la consulta SeisComP del SGC."""
+    filas = []
+    for m in _RE_FILA.finditer(html):
+        f = m.group(1)
+        if not _RE_FECHA.search(f):
+            continue  # encabezados y filas de resumen
+        c = [_RE_TAG.sub("", x).strip() for x in _RE_CELDA.findall(f)]
+        if len(c) >= 13:
+            filas.append(c[:13] + [c[-1]])
+    df = pd.DataFrame(filas, columns=COLS_SC)
+    for col in ["latitud", "longitud", "profundidad_km", "magnitud", "fases_asociadas", "rms", "gap_azimutal",
+                "error_lat_km", "error_lon_km", "error_prof_km"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 
-def descargar_usgs() -> pd.DataFrame:
-    """Sismos reales del USGS (M≥3,5, bounding box de Santander) hasta hoy.
-
-    Sirve para validar la proyección con eventos posteriores a marzo de 2018, que es donde termina la
-    Consulta Experta del SGC. Las magnitudes del USGS (mayormente mb) no son idénticas a las del SGC (Ml).
-    """
+def _consultar_seiscomp(ini: pd.Timestamp, fin: pd.Timestamp) -> pd.DataFrame:
     lat0, lat1, lon0, lon1 = BBOX_SANTANDER
-    r = _get("https://earthquake.usgs.gov/fdsnws/event/1/query", params={
-        "format": "csv", "minlatitude": lat0, "maxlatitude": lat1, "minlongitude": lon0, "maxlongitude": lon1,
-        "starttime": "1993-01-01", "endtime": pd.Timestamp.today().strftime("%Y-%m-%d"),
-        "minmagnitude": 3.5, "orderby": "time-asc"})
-    RUTA_USGS.write_bytes(r.content)
-    return pd.read_csv(RUTA_USGS)
+    datos = {
+        "inicial": ini.strftime("%d/%m/%Y"), "final": fin.strftime("%d/%m/%Y"), "ubi": "cuadrante",
+        "longitudStart": lon0, "longitudEnd": lon1, "latitudStart": lat0, "latitudEnd": lat1,
+        "latitudCentral": 5, "longitudCentral": -76, "radio": 100, "magnitudStart": 0, "magnitudEnd": 9,
+        "depthStart": 0, "depthEnd": 700, "rmsStart": 0, "rmsEnd": 10, "gapStart": 0, "gapEnd": 360,
+        "eprofmin": 0, "eprofmax": 999, "elongmin": 0, "elongmax": 999, "elatmin": 0, "elatmax": 999, "Submit": "Consultar",
+    }
+    for i in range(4):
+        try:
+            r = requests.post(URL_SGC_SC, data=datos, headers=HEADERS, timeout=600, verify=False)
+            r.raise_for_status()
+            return _parsear_seiscomp(r.content.decode("utf-8", errors="ignore"))
+        except requests.RequestException as exc:
+            log.warning("SeisComP %s: reintento %d (%s)", ini.year, i + 1, exc)
+            time.sleep(10 * (i + 1))
+    raise RuntimeError(f"El SGC (SeisComP) no respondió para {ini:%Y-%m-%d}")
+
+
+def _descargar_anio_seiscomp(anio: int) -> pd.DataFrame:
+    """Un año completo (o hasta hoy si es el año en curso). El año en curso se vuelve a pedir si el caché es de otro día."""
+    hoy = pd.Timestamp.today().normalize()
+    parcial = anio == hoy.year
+    ruta = DIR_RAW / (f"sgc_sc_{anio}_{hoy:%Y%m%d}.csv" if parcial else f"sgc_sc_{anio}.csv")
+    if ruta.exists():
+        return pd.read_csv(ruta)
+    for viejo in DIR_RAW.glob(f"sgc_sc_{anio}_*.csv"):
+        viejo.unlink()  # caché vencido del año en curso
+    df = _consultar_seiscomp(pd.Timestamp(anio, 1, 1), hoy if parcial else pd.Timestamp(anio, 12, 31))
+    df.to_csv(ruta, index=False)
+    return df
+
+
+def actualizar_reciente(desde: pd.Timestamp) -> pd.DataFrame:
+    """Eventos del SGC (SeisComP) posteriores a `desde`, para refrescar la app sin descargar todo el año."""
+    hoy = pd.Timestamp.today().normalize()
+    nuevo = _consultar_seiscomp(desde.normalize() - pd.Timedelta(days=1), hoy)
+    nuevo["fecha_hora"] = pd.to_datetime(nuevo["fecha_hora"])
+    return nuevo[nuevo["fecha_hora"] > desde.tz_localize(None) if desde.tzinfo else nuevo["fecha_hora"] > desde]
+
+
+def _unificar(viejo: pd.DataFrame, nuevo: pd.DataFrame) -> pd.DataFrame:
+    """Une la Consulta Experta (1993-2017) con SeisComP (2018+) en un solo esquema."""
+    v = viejo.rename(columns={
+        "FECHA": "fecha", "HORA_UTC": "hora_utc", "LATITUD (grados)": "latitud", "LONGITUD (grados)": "longitud",
+        "PROFUNDIDAD (Km)": "profundidad_km", "MAGNITUD Ml": "magnitud_ml", "MAGNITUD Mw": "magnitud_mw",
+        "DEPARTAMENTO": "departamento", "MUNICIPIO": "municipio_sgc", "# FASES": "fases_asociadas", "RMS (Seg)": "rms",
+        "GAP (grados)": "gap_azimutal", "ERROR LATITUD (Km)": "error_lat_km", "ERROR LONGITUD (Km)": "error_lon_km",
+        "ERROR PROFUNDIDAD (Km)": "error_prof_km", "ESTADO": "estado"})
+    for c in ["latitud", "longitud", "profundidad_km", "magnitud_ml", "magnitud_mw", "fases_asociadas", "rms", "gap_azimutal",
+              "error_lat_km", "error_lon_km", "error_prof_km"]:
+        v[c] = pd.to_numeric(v[c], errors="coerce")
+    v["magnitud"] = v["magnitud_mw"].fillna(v["magnitud_ml"])  # Mw cuando existe (más fiable), si no Ml
+    v["tipo_magnitud"] = np.where(v["magnitud_mw"].notna(), "Mw", "Ml")
+    v = v[pd.to_datetime(v["fecha"], errors="coerce").dt.year < ANIO_INI_SEISCOMP]
+    v["fuente"] = "SGC Consulta Experta"
+
+    n = nuevo.copy()
+    n[["fecha", "hora_utc"]] = n["fecha_hora"].astype(str).str.split(" ", n=1, expand=True)
+    n["municipio_sgc"] = n["region"].astype(str).str.split(" - ").str[0]
+    n["departamento"] = n["region"].astype(str).str.extract(r" - ([^,]+),")[0]
+    n["fuente"] = "SGC SeisComP"
+    cols = ["fecha", "hora_utc", "latitud", "longitud", "profundidad_km", "magnitud", "tipo_magnitud", "departamento",
+            "municipio_sgc", "fases_asociadas", "rms", "gap_azimutal", "error_lat_km", "error_lon_km", "error_prof_km",
+            "estado", "fuente"]
+    out = pd.concat([v[cols], n[cols]], ignore_index=True)
+    return out.sort_values(["fecha", "hora_utc"]).reset_index(drop=True)
+
+
+def descargar_catalogo_sgc() -> pd.DataFrame:
+    """Catálogo SGC unificado 1993-hoy para el bounding box de Santander -> data/sismos_SGC.csv."""
+    DIR_RAW.mkdir(parents=True, exist_ok=True)
+    viejo = []
+    for anio in range(ANIO_INI, ANIO_INI_SEISCOMP):
+        d = _descargar_anio_sgc(anio)
+        log.info("SGC Consulta Experta %d: %d eventos", anio, len(d))
+        if len(d):
+            viejo.append(d)
+    nuevo = []
+    for anio in range(ANIO_INI_SEISCOMP, pd.Timestamp.today().year + 1):
+        d = _descargar_anio_seiscomp(anio)
+        log.info("SGC SeisComP %d: %d eventos", anio, len(d))
+        nuevo.append(d)
+    df = _unificar(pd.concat(viejo, ignore_index=True), pd.concat(nuevo, ignore_index=True))
+    df.to_csv(RUTA_SISMOS_BRUTO, index=False)
+    return df
 
 
 # ------------------------------------------------------------------ 2. Límites (DANE MGN) y población (DANE)
@@ -446,7 +526,6 @@ if __name__ == "__main__":
     mun = construir_municipios()
     print("Municipios:", len(mun), "población:", int(mun["poblacion"].sum()))
     guardar_poligono_santander(mun)
-    print("USGS:", len(descargar_usgs()), "eventos")
     sit = construir_sitios()
     print("Sitios:", sit.shape)
     print(sit.describe().T.to_string())

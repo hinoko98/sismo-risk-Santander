@@ -1,15 +1,16 @@
-"""Proyección probabilística hasta 2027 con datos reales (modelo de Poisson por municipio).
+"""Proyección probabilística hasta 2027 con datos reales del SGC (modelo de Poisson por municipio).
 
 Idea: un sismo concreto no se puede predecir, pero sí la probabilidad de que ocurra al menos uno en un
 periodo, a partir de su tasa histórica (enfoque estándar en amenaza sísmica):  P = 1 - exp(-λ·T).
 
-  * λ se estima por municipio con la última década completa del catálogo SGC (2008–2017). Antes de 2008 el SGC
+  * λ se estima por municipio con la última década completa del catálogo (2016–2025). Antes de 2008 el SGC
     reportaba magnitudes sistemáticamente más altas (cambio de método), así que usar todo el historial inflaría λ.
   * Como muchos municipios tienen pocos eventos, la tasa se "encoge" hacia el promedio departamental
     (estimador bayesiano empírico gamma-Poisson) para no declarar probabilidad cero por falta de datos.
   * Las clases son las mismas del modelo supervisado, definidas por la magnitud máxima del año:
     Bajo < 3 · Medio 3–<4 · Alto ≥ 4.
-  * Validación: sismos reales del USGS de 2019 a 2025, posteriores a todo lo usado para estimar λ.
+  * Validación retrospectiva (backtest): se estima λ con 2008–2017 y se compara con lo que realmente registró
+    el SGC entre 2018 y 2025, años que no se usaron para estimarlo.
 
 Supuestos: los eventos llegan de forma independiente y estacionaria (no modela réplicas ni cambios del
 régimen sísmico). Es una extrapolación de tasas, no una predicción de eventos.
@@ -18,16 +19,17 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from .config import ANIO_ACTUAL, ETIQUETAS_RIESGO, UMBRAL_ALTO, UMBRAL_MEDIO
+from .config import ANIO_ACTUAL, ANIO_PROYECCION, ETIQUETAS_RIESGO, UMBRAL_ALTO, UMBRAL_MEDIO
 
-VENTANA = (2008, 2017)   # años usados para estimar la tasa
-PESO_PRIOR = 5.0         # años "virtuales" de información del promedio departamental
-ANIOS_VALIDACION = list(range(2019, 2026))  # años completos con datos del USGS
+VENTANA_ACTUAL = (2016, ANIO_ACTUAL)   # años para la proyección real
+VENTANA_BACKTEST = (2008, 2017)        # años para el backtest
+ANIOS_BACKTEST = list(range(2018, ANIO_ACTUAL + 1))
+PESO_PRIOR = 5.0                       # años "virtuales" de información del promedio departamental
 
 
-def estimar_tasas(eventos: pd.DataFrame, municipios: list[str]) -> pd.DataFrame:
+def estimar_tasas(eventos: pd.DataFrame, municipios: list[str], ventana: tuple[int, int] = VENTANA_ACTUAL) -> pd.DataFrame:
     """Tasa anual λ de sismos M≥3 y M≥4 por municipio (con encogimiento hacia el promedio)."""
-    ini, fin = VENTANA
+    ini, fin = ventana
     T = fin - ini + 1
     e = eventos[(eventos["anio"] >= ini) & (eventos["anio"] <= fin)]
     out = pd.DataFrame(index=pd.Index(municipios, name="municipio"))
@@ -52,8 +54,8 @@ def clases_anuales(tasas: pd.DataFrame) -> pd.DataFrame:
     return t
 
 
-def proyectar(tasas: pd.DataFrame, hasta: int = 2027) -> pd.DataFrame:
-    """Probabilidad acumulada (desde enero de 2018) de ≥1 sismo M≥4 y M≥3, y conteo esperado, por año."""
+def proyectar(tasas: pd.DataFrame, hasta: int = ANIO_PROYECCION) -> pd.DataFrame:
+    """Probabilidad acumulada (desde enero del año siguiente al último completo) de ≥1 sismo M≥4 y M≥3, por año."""
     filas = []
     for anio in range(ANIO_ACTUAL + 1, hasta + 1):
         T = anio - ANIO_ACTUAL
@@ -67,35 +69,28 @@ def proyectar(tasas: pd.DataFrame, hasta: int = 2027) -> pd.DataFrame:
     return pd.concat(filas, ignore_index=True)
 
 
-def validar(tasas: pd.DataFrame, usgs: pd.DataFrame, municipios_geo) -> dict:
-    """Compara lo proyectado con los sismos M≥4 REALES del USGS de 2019–2025 (nunca vistos al estimar λ)."""
-    import geopandas as gpd
-    u = usgs[usgs["mag"] >= UMBRAL_ALTO].copy()
-    u["anio"] = pd.to_datetime(u["time"], utc=True).dt.year
-    u = u[u["anio"].isin(ANIOS_VALIDACION)]
-    pts = gpd.GeoDataFrame(u, geometry=gpd.points_from_xy(u["longitude"], u["latitude"]), crs=4326)
-    j = gpd.sjoin(pts, municipios_geo[["municipio", "geometry"]], predicate="within")
-    obs = j.groupby(["municipio", "anio"]).size()
-
-    mun = tasas["municipio"].tolist()
-    idx = pd.MultiIndex.from_product([mun, ANIOS_VALIDACION], names=["municipio", "anio"])
+def validar(tasas_backtest: pd.DataFrame, eventos: pd.DataFrame) -> dict:
+    """Backtest: compara las tasas estimadas con 2008–2017 contra los sismos M≥4 REALES del SGC de 2018–2025."""
+    e = eventos[(eventos["magnitud"] >= UMBRAL_ALTO) & (eventos["anio"].isin(ANIOS_BACKTEST))]
+    obs = e.groupby(["municipio", "anio"]).size()
+    mun = tasas_backtest["municipio"].tolist()
+    idx = pd.MultiIndex.from_product([mun, ANIOS_BACKTEST], names=["municipio", "anio"])
     obs = obs.reindex(idx, fill_value=0)
-    p = 1 - np.exp(-tasas.set_index("municipio")["lambda_m4"].reindex(mun))
-    p_mun_anio = np.repeat(p.to_numpy(), len(ANIOS_VALIDACION))
+    lam = tasas_backtest.set_index("municipio")["lambda_m4"].reindex(mun)
+    p_mun_anio = np.repeat((1 - np.exp(-lam)).to_numpy(), len(ANIOS_BACKTEST))
     hubo = (obs.to_numpy() > 0).astype(float)
 
     brier = float(np.mean((p_mun_anio - hubo) ** 2))
-    brier_clim = float(np.mean((hubo.mean() - hubo) ** 2))  # referencia: misma probabilidad para todos
+    brier_ref = float(np.mean((hubo.mean() - hubo) ** 2))  # referencia: misma probabilidad para todos
     por_mun = obs.groupby("municipio").sum().reindex(mun)
-    esperado = tasas.set_index("municipio")["lambda_m4"].reindex(mun) * len(ANIOS_VALIDACION)
-    rho = spearmanr(esperado, por_mun).statistic
-    por_anio = obs.groupby("anio").sum()
+    esperado = lam * len(ANIOS_BACKTEST)
+    por_anio = obs.groupby("anio").sum().rename("observados").reset_index().assign(esperados=float(lam.sum()))
     return {
-        "anios": f"{ANIOS_VALIDACION[0]}–{ANIOS_VALIDACION[-1]}",
-        "observados_total": int(por_mun.sum()),
-        "esperados_total": float(esperado.sum()),
-        "spearman_municipios": float(rho),
-        "brier": brier, "brier_referencia": brier_clim, "habilidad_brier": 1 - brier / brier_clim,
+        "anios": f"{ANIOS_BACKTEST[0]}–{ANIOS_BACKTEST[-1]}",
+        "ventana": f"{VENTANA_BACKTEST[0]}–{VENTANA_BACKTEST[1]}",
+        "observados_total": int(por_mun.sum()), "esperados_total": float(esperado.sum()),
+        "spearman_municipios": float(spearmanr(esperado, por_mun).statistic),
+        "brier": brier, "brier_referencia": brier_ref, "habilidad_brier": 1 - brier / brier_ref,
         "tabla_municipios": pd.DataFrame({"municipio": mun, "esperados": esperado.to_numpy(), "observados": por_mun.to_numpy()}),
-        "por_anio": por_anio.rename("observados").reset_index().assign(esperados=float(tasas["lambda_m4"].sum())),
+        "por_anio": por_anio,
     }

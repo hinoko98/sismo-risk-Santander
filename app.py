@@ -17,10 +17,11 @@ from shapely.geometry import mapping, shape
 from streamlit_folium import st_folium
 
 from src.config import (
-    ANIO_ACTUAL, AZUL_MARCA, CENTRO_SANTANDER, COLORES_RIESGO, ETIQUETAS_RIESGO, NARANJA_MARCA, OBJETIVO,
-    RUTA_AGENTE_RL, RUTA_MUN_FEATURES, RUTA_ICONO, RUTA_USGS, RUTA_LOGO, RUTA_MODELO, RUTA_MUNICIPIOS, RUTA_PANEL, RUTA_SISMOS_LIMPIO,
+    ANIO_ACTUAL, ANIO_PROYECCION, AZUL_MARCA, CENTRO_SANTANDER, COLORES_RIESGO, ETIQUETAS_RIESGO, NARANJA_MARCA, OBJETIVO,
+    RUTA_AGENTE_RL, RUTA_MUN_FEATURES, RUTA_ICONO, RUTA_LOGO, RUTA_MODELO, RUTA_MUNICIPIOS, RUTA_PANEL, RUTA_SISMOS_LIMPIO,
     UMBRAL_ALTO, UMBRAL_MEDIO, VARIABLES, VARS_SISMICAS, VARS_TERRITORIALES,
 )
+from src.decision import ACCIONES, recomendar, resumen as resumen_decision
 from src.ficha import generar_ficha
 from src.model_training import entrenar, explicar, predecir
 from src.riesgo_integral import calcular_iri, resumen_poblacion
@@ -29,6 +30,18 @@ logging.basicConfig(level=logging.INFO)
 st.set_page_config(page_title="Sismo-Risk Santander", page_icon=str(RUTA_ICONO) if RUTA_ICONO.exists() else "🌋", layout="wide")
 COLOR_ETQ = {ETIQUETAS_RIESGO[k]: v for k, v in COLORES_RIESGO.items()}
 ORDEN_ETQ = list(ETIQUETAS_RIESGO.values())
+
+
+def plot(fig, **kw):
+    """Muestra una figura Plotly con separadores colombianos (1.234,5) en lugar de abreviaturas como «1M» o «10k»."""
+    fig.update_layout(separators=",.")
+    st.plotly_chart(fig, **kw)
+
+
+def miles(n) -> str:
+    """Habitantes con separador de miles colombiano y sin decimales: 617659.0 -> '617.659'."""
+    return f"{int(round(float(n))):,}".replace(",", ".")
+
 
 st.markdown(
     f"""<style>
@@ -63,7 +76,8 @@ def cargar_municipios_geo() -> dict | None:
         geo = json.loads(RUTA_MUNICIPIOS.read_text(encoding="utf-8"))
         for f in geo["features"]:  # se simplifica la geometría (~200 m) y se envían solo los campos necesarios
             f["geometry"] = mapping(shape(f["geometry"]).simplify(0.002, preserve_topology=True))
-            f["properties"] = {k: f["properties"][k] for k in ("municipio", "poblacion")}
+            pob = int(round(float(f["properties"]["poblacion"])))
+            f["properties"] = {"municipio": f["properties"]["municipio"], "poblacion": pob, "habitantes": miles(pob)}
         return geo
     except Exception:
         logging.exception("No se pudo leer los municipios")
@@ -115,34 +129,33 @@ def cargar_agente(_panel: pd.DataFrame | None) -> tuple[dict | None, str | None]
 
 @st.cache_data(show_spinner="Calculando proyección…")
 def cargar_proyeccion() -> tuple[dict | None, str | None]:
-    """Tasas de Poisson por municipio, proyección a 2027 y validación con sismos reales del USGS."""
+    """Tasas de Poisson por municipio, proyección y prueba retrospectiva, todo con el catálogo del SGC."""
     try:
-        import geopandas as gpd
-        from src.proyeccion import clases_anuales, estimar_tasas, proyectar, validar
-        mun = gpd.read_file(RUTA_MUNICIPIOS)
-        tasas = clases_anuales(estimar_tasas(pd.read_csv(RUTA_SISMOS_LIMPIO), sorted(mun["municipio"])))
-        val = validar(tasas, pd.read_csv(RUTA_USGS), mun) if RUTA_USGS.exists() else None
-        return {"tasas": tasas, "proy": proyectar(tasas, 2027), "val": val}, None
+        from src.proyeccion import VENTANA_ACTUAL, VENTANA_BACKTEST, clases_anuales, estimar_tasas, proyectar, validar
+        lista = sorted(pd.read_csv(RUTA_MUN_FEATURES)["municipio"])
+        ev = pd.read_csv(RUTA_SISMOS_LIMPIO, usecols=["municipio", "anio", "magnitud"])
+        tasas = clases_anuales(estimar_tasas(ev, lista))
+        return {"tasas": tasas, "proy": proyectar(tasas), "ventana": f"{VENTANA_ACTUAL[0]}–{VENTANA_ACTUAL[1]}",
+                "val": validar(estimar_tasas(ev, lista, VENTANA_BACKTEST), ev)}, None
     except Exception as exc:
         logging.exception("Fallo en la proyección")
         return None, f"{type(exc).__name__}: {exc}"
 
 
-@st.cache_data(ttl=3600, show_spinner="Consultando actividad reciente (USGS)…")
+@st.cache_data(ttl=3600, show_spinner="Consultando actividad reciente (SGC)…")
 def cargar_decision() -> tuple[dict | None, str | None]:
-    """Índice de Riesgo Integral + monitor de actividad reciente (USGS en vivo, con respaldo local)."""
+    """Índice de Riesgo Integral + monitor de actividad reciente (catálogo SGC, con actualización en vivo si hay internet)."""
     try:
         import geopandas as gpd
         from src import monitor
         mun = gpd.read_file(RUTA_MUNICIPIOS)
         lista = sorted(mun["municipio"])
         iri = calcular_iri(pd.read_csv(RUTA_MUN_FEATURES))
-        usgs, fuente = monitor.cargar_usgs(en_vivo=True)
-        um = monitor.asignar_municipio(usgs, mun)
-        act, fin = monitor.evaluar_actividad(um, lista)
-        base = monitor.tasas_base(um, lista)
+        cat, fuente = monitor.cargar_catalogo(mun, en_vivo=True)
+        act, fin = monitor.evaluar_actividad(cat, lista)
+        base = monitor.tasas_base(cat, lista)
         return {"iri": iri, "act": act, "fin": fin, "fuente": fuente,
-                "serie": monitor.serie_mensual(um, float(base.sum()))}, None
+                "serie": monitor.serie_mensual(cat, float(base.sum()))}, None
     except Exception as exc:
         logging.exception("Fallo en el centro de decisión")
         return None, f"{type(exc).__name__}: {exc}"
@@ -179,8 +192,10 @@ if err_datos or panel is None:
 if err_modelo:
     st.warning(f"El simulador no está disponible: {err_modelo}")
 
+panel["poblacion"] = panel["poblacion"].round().astype("int64")  # habitantes enteros
 actual = panel[panel["anio"] == ANIO_ACTUAL].reset_index(drop=True)
 feats_mun = pd.read_csv(RUTA_MUN_FEATURES)
+feats_mun["poblacion"] = feats_mun["poblacion"].round().astype("int64")
 etiquetado = panel.dropna(subset=[OBJETIVO]).copy()
 etiquetado["riesgo_etiqueta"] = etiquetado[OBJETIVO].astype(int).map(ETIQUETAS_RIESGO)
 if "predicciones" not in st.session_state:
@@ -256,31 +271,32 @@ entrada se calculan con datos hasta el año *t*, por lo que ninguna revela la cl
         fig = px.histogram(eventos, x="magnitud", nbins=40, log_y=True, title="Distribución de sismos por magnitud",
                            color_discrete_sequence=[NARANJA_MARCA])
         fig.update_layout(yaxis_title="Eventos (escala log)")
-        st.plotly_chart(fig, width="stretch")
+        plot(fig, width="stretch")
     with c2:
         por_anio = eventos.groupby("anio").agg(total=("magnitud", "size"), m3=("magnitud", lambda s: (s >= 3).sum())).reset_index()
         fig = px.line(por_anio.melt("anio", var_name="Serie", value_name="Eventos").replace({"total": "Todos", "m3": "M≥3"}),
                       x="anio", y="Eventos", color="Serie", title="Sismos por año (el total sube por mejor cobertura de la red)",
                       color_discrete_sequence=[AZUL_MARCA, NARANJA_MARCA])
-        st.plotly_chart(fig, width="stretch")
+        plot(fig, width="stretch")
     c3, c4 = st.columns(2)
     with c3:
-        st.plotly_chart(px.histogram(eventos, x="profundidad_km", nbins=60, title="Profundidad (km): sismos someros y Nido de Bucaramanga",
+        plot(px.histogram(eventos, x="profundidad_km", nbins=60, title="Profundidad (km): sismos someros y Nido de Bucaramanga",
                                      color_discrete_sequence=[AZUL_MARCA]), width="stretch")
     with c4:
         cl = etiquetado["riesgo_etiqueta"].value_counts().reindex(ORDEN_ETQ).reset_index()
         cl.columns = ["Riesgo", "Municipio-años"]
-        st.plotly_chart(px.bar(cl, x="Riesgo", y="Municipio-años", color="Riesgo", title="Clases de riesgo en el dataset (desbalanceadas)",
+        plot(px.bar(cl, x="Riesgo", y="Municipio-años", color="Riesgo", title="Clases de riesgo en el dataset (desbalanceadas)",
                                color_discrete_map=COLOR_ETQ), width="stretch")
     c5, c6 = st.columns(2)
     with c5:
         top = eventos["municipio"].value_counts().head(12).sort_values().reset_index()
         top.columns = ["Municipio", "Eventos"]
-        st.plotly_chart(px.bar(top, x="Eventos", y="Municipio", orientation="h", title="Municipios con más sismos",
+        plot(px.bar(top, x="Eventos", y="Municipio", orientation="h", title="Municipios con más sismos",
                                color_discrete_sequence=[NARANJA_MARCA]), width="stretch")
     with c6:
-        st.plotly_chart(px.scatter(actual, x="poblacion", y="PGA_medio", size="area_km2", hover_name="municipio", log_x=True,
-                                   title="Población vs. PGA (amenaza SGC 475 años)", color_discrete_sequence=[AZUL_MARCA]),
+        plot(px.scatter(actual, x="poblacion", y="PGA_medio", size="area_km2", hover_name="municipio", log_x=True,
+                                   title="Habitantes vs. PGA (amenaza SGC 475 años)", color_discrete_sequence=[AZUL_MARCA],
+                                   labels={"poblacion": "Habitantes (escala log)", "PGA_medio": "PGA (g)"}).update_xaxes(tickformat=",d"),
                         width="stretch")
 
     st.subheader("Dataset limpio (municipio-año)")
@@ -290,7 +306,7 @@ entrada se calculan con datos hasta el año *t*, por lo que ninguna revela la cl
         st.markdown("""
 | Variable(s) | Fuente |
 |---|---|
-| Actividad sísmica: frecuencia, magnitud, profundidad, RMS, GAP, fases, energía | [SGC · Catálogo sísmico, Consulta Experta](https://bdrsnc.sgc.gov.co/paginas1/catalogo/Consulta_Experta/consultaexperta_2.php) (jun-1993 a mar-2018; el servicio no entrega fechas posteriores) |
+| Actividad sísmica: frecuencia, magnitud, profundidad, RMS, GAP, fases, errores de localización, energía | [SGC · Catálogo sísmico, Consulta Experta](https://bdrsnc.sgc.gov.co/paginas1/catalogo/Consulta_Experta/consultaexperta_2.php) (1993-2017) y su sucesor [SGC · SeisComP](https://bdrsnc.sgc.gov.co/paginas1/catalogo/Consulta_Experta_Seiscomp/consultaexperta.php) (2018 hasta hoy) |
 | PGA_medio | [SGC · Amenaza sísmica de Colombia 2020](https://amenazasismica.sgc.gov.co/) — PGA en roca, retorno 475 años (malla 0,1°) |
 | poblacion, densidad_poblacional | [DANE · Proyecciones de población 2025](https://www.dane.gov.co/index.php/estadisticas-por-tema/demografia-y-poblacion/proyecciones-de-poblacion) |
 | area_km2, límites, municipio de cada evento | Marco Geoestadístico Nacional (DANE) vía geoBoundaries; referencia oficial: [IGAC datos abiertos](https://www.igac.gov.co/datos-abiertos/datos-abiertos-geoespaciales) |
@@ -299,7 +315,6 @@ entrada se calculan con datos hasta el año *t*, por lo que ninguna revela la cl
 | distancia_falla_km | GEM Global Active Faults Database |
 | distancia_cuerpos_agua | OpenStreetMap (ríos y cuerpos de agua) |
 | distancia_bucaramanga_km | Calculada desde el centroide municipal a Bucaramanga (zona de interés) |
-| Actividad reciente (Centro de decisión y proyección) | [USGS ComCat](https://earthquake.usgs.gov/fdsnws/event/1/), M≥3,5, consulta en vivo |
 """)
 
 if vista == VISTAS[1]:
@@ -371,11 +386,11 @@ if vista == VISTAS[2]:
         with c1:
             imp = pd.Series(m["importancias"]).head(12).sort_values().reset_index()
             imp.columns = ["Variable", "Importancia"]
-            st.plotly_chart(px.bar(imp, x="Importancia", y="Variable", orientation="h", title="Variables más influyentes",
+            plot(px.bar(imp, x="Importancia", y="Variable", orientation="h", title="Variables más influyentes",
                                    color_discrete_sequence=[AZUL_MARCA]), width="stretch")
         with c2:
             cm = pd.DataFrame(m["matriz_confusion"]).reindex(index=ORDEN_ETQ, columns=ORDEN_ETQ).fillna(0)
-            st.plotly_chart(px.imshow(cm, text_auto=True, color_continuous_scale="Blues", title="Matriz de confusión (test)",
+            plot(px.imshow(cm, text_auto=True, color_continuous_scale="Blues", title="Matriz de confusión (test)",
                                       labels=dict(x="Predicho", y="Real")), width="stretch")
         st.divider()
         if "ultima" not in st.session_state:
@@ -384,7 +399,7 @@ if vista == VISTAS[2]:
             clase, probs, mun, fila = st.session_state.ultima
             st.markdown(f"### {mun}: {badge(clase)} el próximo año", unsafe_allow_html=True)
             dfp = pd.DataFrame({"Categoría": [ETIQUETAS_RIESGO[c] for c in probs], "Probabilidad": list(probs.values())})
-            st.plotly_chart(px.bar(dfp, x="Categoría", y="Probabilidad", color="Categoría", color_discrete_map=COLOR_ETQ,
+            plot(px.bar(dfp, x="Categoría", y="Probabilidad", color="Categoría", color_discrete_map=COLOR_ETQ,
                                    range_y=[0, 1]), width="stretch")
             st.markdown("**¿Por qué este resultado?** (IA explicable)")
             try:
@@ -396,7 +411,7 @@ if vista == VISTAS[2]:
                              title=f"Probabilidad de riesgo Alto: {ex.attrs['probabilidad']:.0%}. Efecto de cada variable frente a un valor típico (puntos porcentuales)",
                              labels={"pp": "Puntos porcentuales", "etiqueta": ""})
                 fig.update_layout(coloraxis_showscale=False)
-                st.plotly_chart(fig, width="stretch")
+                plot(fig, width="stretch")
                 st.caption("Rojo: la variable aumenta la probabilidad de riesgo Alto respecto de un municipio típico; verde: la reduce. "
                            "Se calcula reemplazando cada variable por su mediana y midiendo cuánto cambia la predicción.")
             except Exception as exc:
@@ -434,10 +449,10 @@ if vista == VISTAS[3]:
             fig = px.scatter(tabla, x="pc1", y="pc2", color="grupo", hover_name="municipio", size="poblacion", size_max=28,
                              color_discrete_map=COLOR_ETQ, title=f"Proyección PCA (varianza explicada {sum(diag['varianza_explicada']):.0%})",
                              category_orders={"grupo": ORDEN_ETQ})
-            st.plotly_chart(fig, width="stretch")
+            plot(fig, width="stretch")
         with c2:
             sil = pd.DataFrame({"k": list(diag["silueta_por_k"]), "Silueta": list(diag["silueta_por_k"].values())})
-            st.plotly_chart(px.line(sil, x="k", y="Silueta", markers=True, title="Silueta según k",
+            plot(px.line(sil, x="k", y="Silueta", markers=True, title="Silueta según k",
                                     color_discrete_sequence=[NARANJA_MARCA]), width="stretch")
         perfil = tabla.groupby("grupo")[["frecuencia_anual_m3", "mag_max", "profundidad_media", "poblacion", "PGA_medio", "distancia_falla_km"]].mean().round(2)
         st.markdown("**Perfil medio de cada grupo**")
@@ -461,11 +476,11 @@ if vista == VISTAS[4]:
         with c1:
             curva = pd.DataFrame({"Época": range(1, len(agente["curva"]) + 1), "Recompensa media": agente["curva"]})
             curva["Suavizada"] = curva["Recompensa media"].rolling(15, min_periods=1).mean()
-            st.plotly_chart(px.line(curva, x="Época", y="Suavizada", title="Curva de aprendizaje", color_discrete_sequence=[AZUL_MARCA]),
+            plot(px.line(curva, x="Época", y="Suavizada", title="Curva de aprendizaje", color_discrete_sequence=[AZUL_MARCA]),
                             width="stretch")
         with c2:
             comp = agente["comparacion"]
-            st.plotly_chart(px.bar(comp, x="Política", y="Recompensa neta media/año", title="Recompensa en años de prueba",
+            plot(px.bar(comp, x="Política", y="Recompensa neta media/año", title="Recompensa en años de prueba",
                                    color_discrete_sequence=[NARANJA_MARCA]), width="stretch")
         st.dataframe(agente["comparacion"], hide_index=True, width="stretch")
         st.markdown(f"**Prioridad de evaluación para {ANIO_ACTUAL + 1}** (ventaja aprendida de evaluar, con presupuesto completo)")
@@ -474,21 +489,22 @@ if vista == VISTAS[4]:
         st.dataframe(pri.head(15), hide_index=True, width="stretch")
 
 if vista == VISTAS[5]:
-    st.subheader("Proyección probabilística hasta 2027")
+    st.subheader(f"Proyección probabilística hasta {ANIO_PROYECCION}")
     res, err_p = cargar_proyeccion()
     if err_p or res is None:
         st.error(f"No fue posible calcular la proyección: {err_p}")
     else:
+        v = res["val"]
         st.markdown(
-            "El catálogo del SGC termina en marzo de 2018, y **un sismo concreto no se puede predecir**. Lo que sí se puede es proyectar la "
-            "**probabilidad** de que ocurra al menos uno en cada municipio, a partir de su tasa histórica (modelo de Poisson: P = 1 − e^(−λ·T)). "
-            "λ se estima con la última década completa (2008–2017), porque antes de 2008 el SGC reportaba magnitudes más altas, y se suaviza hacia el "
+            "**Un sismo concreto no se puede predecir.** Lo que sí se puede es proyectar la **probabilidad** de que ocurra al menos uno en cada "
+            "municipio, a partir de su tasa histórica (modelo de Poisson: P = 1 − e^(−λ·T)). "
+            f"λ se estima con la última década completa ({res['ventana']}), porque antes de 2008 el SGC reportaba magnitudes más altas, y se suaviza hacia el "
             "promedio departamental en municipios con pocos eventos. Supone una actividad estacionaria: no modela réplicas ni cambios del régimen sísmico.")
         proy, tasas = res["proy"], res["tasas"]
         c1, c2 = st.columns([2, 1])
         with c2:
-            anio_p = st.slider("Año objetivo", ANIO_ACTUAL + 1, 2027, 2027)
-            medida = st.radio("Medida", ["Probabilidad acumulada desde 2018 (≥1 sismo M≥4)", "Probabilidad solo en ese año (≥1 sismo M≥4)"])
+            anio_p = st.slider("Año objetivo", ANIO_ACTUAL + 1, ANIO_PROYECCION, ANIO_PROYECCION)
+            medida = st.radio("Medida", [f"Probabilidad acumulada desde {ANIO_ACTUAL + 1} (≥1 sismo M≥4)", "Probabilidad solo en ese año (≥1 sismo M≥4)"])
         col = "p_acum_m4" if medida.startswith("Probabilidad acum") else "p_anual_m4"
         d = proy[proy["anio"] == anio_p].set_index("municipio")
         with c1:
@@ -508,7 +524,8 @@ if vista == VISTAS[5]:
                 st_folium(mp, height=480, width=900, returned_objects=[], key=f"mapa_proy_{anio_p}_{col}")
             except Exception as exc:
                 st.error(f"No se pudo dibujar el mapa de proyección: {exc}")
-        m_sel = st.selectbox("Municipio", sorted(tasas["municipio"]), index=sorted(tasas["municipio"]).index("Bucaramanga"))
+        lista = sorted(tasas["municipio"])
+        m_sel = st.selectbox("Municipio", lista, index=lista.index("Bucaramanga") if "Bucaramanga" in lista else 0)
         serie = proy[proy["municipio"] == m_sel]
         t_m = tasas[tasas["municipio"] == m_sel].iloc[0]
         a, b, c = st.columns(3)
@@ -518,42 +535,37 @@ if vista == VISTAS[5]:
         fig = px.line(serie.melt("anio", ["p_acum_m4", "p_acum_m3"], var_name="Evento", value_name="Probabilidad")
                       .replace({"p_acum_m4": "≥1 sismo M≥4", "p_acum_m3": "≥1 sismo M≥3"}),
                       x="anio", y="Probabilidad", color="Evento", markers=True, range_y=[0, 1.02],
-                      title=f"{m_sel}: probabilidad acumulada desde 2018", color_discrete_sequence=[NARANJA_MARCA, AZUL_MARCA])
-        st.plotly_chart(fig, width="stretch")
+                      title=f"{m_sel}: probabilidad acumulada desde {ANIO_ACTUAL + 1}", color_discrete_sequence=[NARANJA_MARCA, AZUL_MARCA])
+        fig.update_xaxes(dtick=1)
+        plot(fig, width="stretch")
         top = d.reset_index().sort_values(col, ascending=False).head(15)[["municipio", col, "esperados_m4"]]
         st.markdown(f"**Municipios con mayor probabilidad a {anio_p}**")
         st.dataframe(top.rename(columns={col: "Probabilidad", "esperados_m4": "Sismos M≥4 esperados (acum.)"}).round(3),
                      hide_index=True, width="stretch")
 
-        v = res["val"]
         st.divider()
-        st.subheader("¿Qué tan bien habría funcionado? Validación con sismos reales")
-        if v is None:
-            st.info("Falta data/usgs_santander.csv (ejecuta `python -m src.real_data`).")
-        else:
-            st.markdown(f"Se compara la proyección con los sismos M≥4 **realmente registrados por el USGS en {v['anios']}**, "
-                        "años que no se usaron para estimar λ.")
-            a, b, c = st.columns(3)
-            a.metric("Sismos M≥4 observados / esperados", f"{v['observados_total']} / {v['esperados_total']:.0f}")
-            b.metric("Correlación entre municipios (Spearman)", f"{v['spearman_municipios']:.2f}")
-            c.metric("Mejora sobre una probabilidad uniforme (Brier)", f"{v['habilidad_brier']:.0%}")
-            pa = v["por_anio"].melt("anio", ["observados", "esperados"], var_name="Serie", value_name="Sismos M≥4")
-            st.plotly_chart(px.bar(pa[pa["Serie"] == "observados"], x="anio", y="Sismos M≥4", title="Sismos M≥4 por año en Santander: observados (USGS) vs. esperados",
-                                   color_discrete_sequence=[AZUL_MARCA]).add_hline(y=float(v["por_anio"]["esperados"].iloc[0]),
-                                   line_color=NARANJA_MARCA, annotation_text="esperados (proyección)"), width="stretch")
-            tv = v["tabla_municipios"].sort_values("observados", ascending=False).head(8).round(1)
-            st.dataframe(tv.rename(columns={"esperados": "Esperados", "observados": "Observados (USGS)"}), hide_index=True, width="stretch")
-            st.warning("El **total** departamental coincide razonablemente, pero la **distribución por municipio** es sensible a la agencia: "
-                       "el USGS ubica muchos eventos del Nido de Bucaramanga en Aratoca, Piedecuesta o Cepitá, mientras el SGC los asigna a Los Santos. "
-                       "Además, el SGC usa magnitud local (Ml) y el USGS mayormente mb. Por eso conviene leer la proyección municipal como orden de "
-                       "magnitud y no como valor exacto.")
+        st.subheader("¿Qué tan bien habría funcionado? Prueba retrospectiva")
+        st.markdown(f"Se estimaron las tasas **solo con {v['ventana']}** y se compararon con los sismos M≥4 que el SGC **realmente registró en {v['anios']}**, "
+                    "años que el modelo no vio.")
+        a, b, c = st.columns(3)
+        a.metric("Sismos M≥4 observados / esperados", f"{v['observados_total']} / {v['esperados_total']:.0f}")
+        b.metric("Correlación entre municipios (Spearman)", f"{v['spearman_municipios']:.2f}")
+        c.metric("Mejora sobre una probabilidad uniforme (Brier)", f"{v['habilidad_brier']:.0%}")
+        fig = px.bar(v["por_anio"], x="anio", y="observados", title="Sismos M≥4 por año en Santander: observados vs. esperados",
+                     color_discrete_sequence=[AZUL_MARCA], labels={"observados": "Sismos M≥4", "anio": "Año"})
+        fig.add_hline(y=float(v["por_anio"]["esperados"].iloc[0]), line_color=NARANJA_MARCA, annotation_text="esperados (proyección)")
+        plot(fig, width="stretch")
+        tv = v["tabla_municipios"].sort_values("observados", ascending=False).head(8).round(1)
+        st.dataframe(tv.rename(columns={"esperados": "Esperados", "observados": "Observados (SGC)"}), hide_index=True, width="stretch")
+        st.caption("Si el total observado se aleja del esperado, la actividad cambió respecto de la década usada para estimar; "
+                   "a nivel de municipio hay más ruido porque la mayoría registra pocos eventos M≥4 por año.")
 
 
 if vista == V_DEC:
     st.subheader("Centro de decisión · del dato a la acción")
     st.markdown(
         "Una predicción sola no ayuda a un gestor del riesgo. Aquí se combinan **cuatro capas de datos reales** para responder "
-        "*¿dónde actuar primero?*: la **amenaza** oficial del SGC, la **población expuesta** del DANE, la **vulnerabilidad del terreno** "
+        "*¿dónde actuar primero y qué hacer?*: la **amenaza** oficial del SGC, la **población expuesta** del DANE, la **vulnerabilidad del terreno** "
         "y la **actividad sísmica de los últimos 12 meses** frente a lo normal en cada municipio.")
     dec, err_dec = cargar_decision()
     if err_dec or dec is None:
@@ -567,13 +579,43 @@ if vista == V_DEC:
             pr["prioridad_rl"] = pr["ventaja_evaluar"].rank(ascending=False, method="min").astype(int)
             tabla = tabla.merge(pr[["municipio", "prioridad_rl"]], on="municipio", how="left")
         res = resumen_poblacion(iri)
+        reco = recomendar(tabla)
         en_alerta = tabla[tabla["semaforo"] != "Verde"]
+
+        st.success("📌 **Decisión recomendada.** " + resumen_decision(reco))
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric(f"Habitantes en los {res['n_alto']} municipios de nivel Alto", f"{res['pob_alto']:,}", f"{res['frac_alto']:.0%} de Santander", delta_color="off")
-        k2.metric("Municipios con actividad inusual (12 m)", f"{len(en_alerta)}", ", ".join(en_alerta['municipio'].head(2)) or "ninguno", delta_color="off")
+        k1.metric("Habitantes en municipios de nivel Alto", miles(res["pob_alto"]), f"{res['n_alto']} municipios · {res['frac_alto']:.0%} de Santander", delta_color="off")
+        k2.metric("Municipios con actividad inusual (12 m)", f"{len(en_alerta)}", ", ".join(en_alerta["municipio"].head(2)) or "ninguno", delta_color="off")
         k3.metric("Mayor Índice de Riesgo Integral", iri.iloc[0]["municipio"], f"{iri.iloc[0]['iri']:.0f}/100", delta_color="off")
-        k4.metric("Último sismo M≥3,5 registrado", f"{dec['fin']:%d-%m-%Y}")
+        k4.metric("Último sismo del catálogo", f"{dec['fin']:%d-%m-%Y}")
         st.caption(f"Actividad reciente: {dec['fuente']}. Se actualiza sola cada hora si hay internet.")
+
+        st.markdown("**Plan de acción y por qué se recomienda**")
+        iconos = {1: "🔴", 2: "🟠", 3: "🟡"}
+        for prio, grupo in reco.groupby("prioridad"):
+            n_g = len(grupo)
+            st.markdown(f"##### {iconos[prio]} {grupo.iloc[0]['decision']} · {n_g} municipio{'s' if n_g > 1 else ''}")
+            st.markdown(f"**Qué hacer:** {ACCIONES[prio][1]}")
+            for f in grupo.itertuples():
+                marca = "✅ dentro del presupuesto" if f.en_plan else "⏳ fuera del presupuesto"
+                extra = " *Además, estudiar la microzonificación de sus suelos.*" if "microzonificación" in f.accion else ""
+                st.markdown(f"- **{f.municipio}** · {miles(f.poblacion)} habitantes · {marca}  \n  {f.porque}{extra}")
+        with st.expander("Ver el plan como tabla y descargarlo"):
+            plan = reco.rename(columns={"prioridad": "Prioridad", "decision": "Decisión", "municipio": "Municipio", "accion": "Acción recomendada",
+                                        "porque": "¿Por qué? (evidencia)", "costo_simulado": "Costo (simulado)", "en_plan": "Dentro del presupuesto"})
+            plan["Habitantes"] = plan["poblacion"].map(miles)
+            st.dataframe(plan[["Prioridad", "Decisión", "Municipio", "Habitantes", "Costo (simulado)", "Dentro del presupuesto", "Acción recomendada",
+                               "¿Por qué? (evidencia)"]], hide_index=True, width="stretch")
+            st.download_button("⬇️ Descargar plan (CSV)", plan.drop(columns=["poblacion"]).to_csv(index=False).encode("utf-8-sig"),
+                               "plan_de_accion_santander.csv", "text/csv")
+        with st.expander("¿Cómo se toma la decisión? (reglas)"):
+            st.markdown(
+                "- **Prioridad 1 · Actuar ya:** nivel de riesgo **Alto** *y* actividad sísmica inusual en los últimos 12 meses.\n"
+                "- **Prioridad 2 · Preparar:** nivel de riesgo **Alto** con actividad normal; el riesgo viene de la amenaza, la población y el terreno, no de un repunte.\n"
+                "- **Prioridad 3 · Vigilar:** actividad inusual en un municipio de nivel Medio o Bajo (señal para observar, no para alarmar).\n"
+                "- Si la vulnerabilidad del terreno está en el 10 % más alto, se añade *estudiar la microzonificación de sus suelos*.\n"
+                "- El plan cubre los municipios por orden de prioridad e IRI hasta agotar un presupuesto de 30 unidades (costo **simulado**, las mismas del agente de refuerzo).\n\n"
+                "Son recomendaciones de apoyo a la decisión: los umbrales los propone el equipo y deben validarlos especialistas en gestión del riesgo.")
 
         capa_d = st.radio("Colorear el mapa por", ["Índice de Riesgo Integral", "Semáforo de actividad (últimos 12 meses)"], horizontal=True)
         try:
@@ -590,7 +632,7 @@ if vista == V_DEC:
                 folium.GeoJson(
                     geo_mun, style_function=lambda f: {"color": "#555", "weight": 0.7, "fillOpacity": 0.75,
                                                        "fillColor": color_d(f["properties"]["municipio"])},
-                    tooltip=folium.GeoJsonTooltip(fields=["municipio", "poblacion"], aliases=["Municipio", "Población"]),
+                    tooltip=folium.GeoJsonTooltip(fields=["municipio", "habitantes"], aliases=["Municipio", "Habitantes"]),
                 ).add_to(md)
             niveles = COLOR_ETQ if capa_d.startswith("Índice") else sem_col
             titulo = "Nivel de riesgo integral (relativo)" if capa_d.startswith("Índice") else "Actividad vs. lo normal"
@@ -608,24 +650,26 @@ if vista == V_DEC:
             fig = px.scatter(tabla, x="PGA_medio", y="poblacion", log_y=True, color="nivel", size="iri", size_max=26,
                              hover_name="municipio", color_discrete_map=COLOR_ETQ, category_orders={"nivel": ORDEN_ETQ},
                              title="Amenaza (PGA) vs. población: arriba a la derecha = crítico",
-                             labels={"PGA_medio": "PGA esperado a 475 años (g)", "poblacion": "Población (escala log)", "nivel": "Nivel"})
-            st.plotly_chart(fig, width="stretch")
+                             labels={"PGA_medio": "PGA esperado a 475 años (g)", "poblacion": "Habitantes (escala log)", "nivel": "Nivel"})
+            fig.update_yaxes(tickformat=",d")
+            plot(fig, width="stretch")
         with c2:
             m = dec["serie"]
-            fig = px.bar(m, x="time", y="observados", title="Sismos M≥4 por mes en Santander (USGS) vs. promedio esperado",
+            fig = px.bar(m, x="time", y="observados", title="Sismos M≥4 por mes en Santander (SGC) vs. promedio esperado",
                          color_discrete_sequence=[AZUL_MARCA], labels={"time": "Mes", "observados": "Sismos M≥4"})
             fig.add_hline(y=float(m["esperados"].iloc[0]), line_color=NARANJA_MARCA, annotation_text="esperado")
-            st.plotly_chart(fig, width="stretch")
+            plot(fig, width="stretch")
 
         st.markdown("**Ranking de prioridad**")
         cols = ["ranking", "municipio", "iri", "nivel", "poblacion", "PGA_medio", "vulnerabilidad", "semaforo", "observados_12m", "esperados_12m"]
-        nombres = {"ranking": "Puesto", "municipio": "Municipio", "iri": "IRI", "nivel": "Nivel", "poblacion": "Población", "PGA_medio": "PGA (g)",
+        nombres = {"ranking": "Puesto", "municipio": "Municipio", "iri": "IRI", "nivel": "Nivel", "poblacion": "Habitantes", "PGA_medio": "PGA (g)",
                    "vulnerabilidad": "Vulnerabilidad", "semaforo": "Semáforo 12 m", "observados_12m": "M≥4 observados", "esperados_12m": "M≥4 esperados"}
         if "prioridad_rl" in tabla:
             cols.append("prioridad_rl")
             nombres["prioridad_rl"] = "Prioridad agente RL"
         vista_t = tabla[cols].rename(columns=nombres)
-        st.dataframe(vista_t.round(3), hide_index=True, width="stretch", height=330)
+        mostrar_t = vista_t.round(3).assign(Habitantes=vista_t["Habitantes"].map(miles))
+        st.dataframe(mostrar_t, hide_index=True, width="stretch", height=330)
         st.download_button("⬇️ Descargar ranking (CSV)", vista_t.to_csv(index=False).encode("utf-8-sig"), "ranking_riesgo_santander.csv", "text/csv")
         st.caption("IRI = amenaza × exposición × (0,5 + 0,5·vulnerabilidad). Es un índice relativo para priorizar, con pesos propuestos por el equipo; "
                    "no estima daños. Una actividad inusual es una señal estadística para vigilar, no un pronóstico.")
@@ -636,19 +680,22 @@ if vista == V_DEC:
         try:
             fila_f = tabla[tabla["municipio"] == sel_f].iloc[0]
             res_p, _ = cargar_proyeccion()
-            p2027 = float(res_p["proy"].query("municipio == @sel_f and anio == 2027")["p_acum_m4"].iloc[0]) if res_p else float("nan")
+            p_fin = float(res_p["proy"].query("municipio == @sel_f and anio == @ANIO_PROYECCION")["p_acum_m4"].iloc[0]) if res_p else float("nan")
             clase_rf = predecir_todos(artefacto, actual).set_index("municipio")["riesgo"].get(sel_f, "—") if artefacto else "—"
             base = feats_mun.set_index("municipio").loc[sel_f]
+            decision_f = reco[reco["municipio"] == sel_f]
             html = generar_ficha({
                 "municipio": sel_f, "iri": float(fila_f["iri"]), "nivel": fila_f["nivel"], "ranking": int(fila_f["ranking"]), "total": len(tabla),
                 "indicadores": {
-                    "Población (DANE 2025)": f"{int(base['poblacion']):,}", "Área (km²)": f"{base['area_km2']:.0f}",
+                    "Población (DANE 2025)": miles(base["poblacion"]), "Área (km²)": f"{base['area_km2']:.0f}",
                     "Densidad (hab/km²)": f"{base['densidad_poblacional']:.0f}", "PGA esperado a 475 años (g, SGC)": f"{base['PGA_medio']:.3f}",
                     "Distancia media a falla activa (km)": f"{base['distancia_falla_km']:.1f}",
                     "Suelo predominante (estimado)": base["suelo_predominante"], "Pendiente media (°)": f"{base['pendiente_media']:.1f}",
                     "Vulnerabilidad del sitio (0–1)": f"{fila_f['vulnerabilidad']:.2f}"},
                 "obs12": int(fila_f["observados_12m"]), "esp12": f"{fila_f['esperados_12m']:.1f}", "semaforo": fila_f["semaforo"],
-                "p2027": p2027, "clase_rf": clase_rf})
+                "p2027": p_fin, "anio_fin": ANIO_PROYECCION, "anio_ini": ANIO_ACTUAL + 1, "clase_rf": clase_rf,
+                "decision": (decision_f.iloc[0]["decision"] + ": " + decision_f.iloc[0]["accion"]) if len(decision_f) else "Sin acción extraordinaria; seguimiento de rutina.",
+                "porque": decision_f.iloc[0]["porque"] if len(decision_f) else ""})
             st.download_button(f"⬇️ Descargar ficha de {sel_f} (HTML, imprimible a PDF)", html.encode("utf-8"), f"ficha_{sel_f.replace(' ', '_')}.html", "text/html")
         except Exception as exc:
             st.warning(f"No se pudo generar la ficha: {exc}")

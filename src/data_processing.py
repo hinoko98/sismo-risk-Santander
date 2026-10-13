@@ -65,7 +65,6 @@ def filtrar_santander(df: pd.DataFrame, municipios: gpd.GeoDataFrame) -> pd.Data
 def limpiar_catalogo() -> tuple[pd.DataFrame, dict]:
     bruto = cargar_bruto()
     informe = {"filas_brutas": len(bruto)}
-    bruto["magnitud"] = bruto["magnitud_mw"].fillna(bruto["magnitud_ml"])  # Mw es más fiable cuando existe
     bruto = bruto.dropna(subset=["magnitud", "latitud", "longitud", "fecha"])
     bruto = bruto.drop_duplicates(subset=["fecha", "hora_utc", "latitud", "longitud"])
     informe["descartados_sin_magnitud_o_duplicados"] = informe["filas_brutas"] - len(bruto)
@@ -73,7 +72,7 @@ def limpiar_catalogo() -> tuple[pd.DataFrame, dict]:
     dentro = filtrar_santander(bruto, cargar_municipios())
     informe["descartados_fuera_santander"] = len(bruto) - len(dentro)
 
-    cols_imputar = ["profundidad_km", "rms", "gap_azimutal", "fases_asociadas"]
+    cols_imputar = ["profundidad_km", "rms", "gap_azimutal", "fases_asociadas", "error_lat_km", "error_lon_km", "error_prof_km"]
     informe["nulos_imputados"] = int(dentro[cols_imputar].isna().sum().sum())
     for c in cols_imputar:
         dentro[c] = pd.to_numeric(dentro[c], errors="coerce")
@@ -83,7 +82,7 @@ def limpiar_catalogo() -> tuple[pd.DataFrame, dict]:
     dentro = dentro.drop(columns=["municipio"], errors="ignore")  # el nombre del SGC se reemplaza por el del DANE
     limpio = dentro.rename(columns={"municipio_dane": "municipio"})[
         ["fecha", "hora_utc", "anio", "municipio", "latitud", "longitud", "profundidad_km", "magnitud",
-         "rms", "gap_azimutal", "fases_asociadas"]
+         "rms", "gap_azimutal", "fases_asociadas", "error_lat_km", "error_lon_km", "error_prof_km", "fuente"]
     ].dropna(subset=["anio"]).astype({"anio": int}).reset_index(drop=True)
     informe["filas_limpias"] = len(limpio)
     return limpio, informe
@@ -127,6 +126,7 @@ def _historial_anual(eventos: pd.DataFrame, municipios: list[str], anios: range)
         n_sismos=("magnitud", "size"), n_sismos_m3=("m3", "sum"), mag_media=("magnitud", "mean"),
         mag_max=("magnitud", "max"), profundidad_media=("profundidad_km", "mean"), frac_someros=("someros", "mean"),
         rms_medio=("rms", "mean"), gap_medio=("gap_azimutal", "mean"), fases_medias=("fases_asociadas", "mean"),
+        error_lat_medio=("error_lat_km", "mean"), error_prof_medio=("error_prof_km", "mean"),
         energia=("energia", "sum"),
     )
     malla = pd.MultiIndex.from_product([municipios, anios], names=["municipio", "anio"])
@@ -157,11 +157,11 @@ def construir_panel(eventos: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
     # Huecos: años sin sismos -> no hubo magnitud/profundidad que promediar. Se imputa con la mediana de lo
     # observado HASTA ese año (nunca con años posteriores, para no filtrar información del futuro).
     for c in ["mag_media", "mag_max", "profundidad_media", "frac_someros", "rms_medio", "gap_medio", "fases_medias",
-              "mag_max_prev3", "tendencia_m3", "n_m3_prev3"]:
+              "error_lat_medio", "error_prof_medio", "mag_max_prev3", "tendencia_m3", "n_m3_prev3"]:
         panel[c] = _imputar_solo_pasado(panel, c)
     panel[OBJETIVO] = panel["CATEGORIA_RIESGO_NUM"].astype(int)
     panel["riesgo_etiqueta"] = panel[OBJETIVO].map(ETIQUETAS_RIESGO)
-    # El último año (2017) no tiene etiqueta (2018 incompleto): se conserva como estado actual
+    # El último año completo no tiene etiqueta (el siguiente está incompleto): se conserva como estado actual
     panel.loc[panel["anio"] > ANIO_MAX_ENTRADA, [OBJETIVO, "riesgo_etiqueta", "mag_max_siguiente"]] = np.nan
     return panel.drop(columns="CATEGORIA_RIESGO_NUM")
 

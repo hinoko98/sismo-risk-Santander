@@ -12,7 +12,6 @@ DIR_MODELOS = RAIZ / "models"
 DIR_ASSETS = RAIZ / "assets"
 
 RUTA_SISMOS_BRUTO = DIR_DATOS / "sismos_SGC.csv"                # catálogo SGC (Consulta Experta)
-RUTA_USGS = DIR_DATOS / "usgs_santander.csv"                       # sismos reales M≥3,5 del USGS (validación posterior a 2018)
 RUTA_SITIOS = DIR_DATOS / "sitios_santander.csv"                # variables de terreno por celda de ~2 km
 RUTA_MUNICIPIOS = DIR_DATOS / "municipios_santander.geojson"    # polígonos MGN-DANE + población DANE
 RUTA_POLIGONO_IGAC = DIR_DATOS / "santander_poligono.geojson"   # unión de municipios
@@ -28,8 +27,9 @@ RUTA_ICONO = DIR_ASSETS / "icono.png"
 # ---------------------------------------------------------------- Definición del problema
 # Unidad de análisis: municipio-año. Las variables describen lo ocurrido hasta el año t y la
 # etiqueta se calcula SOLO con el catálogo del año t+1, de modo que ninguna entrada revela la clase.
-ANIO_MIN, ANIO_MAX_ENTRADA = 1994, 2016   # años t con etiqueta (1993 y 2018 son parciales en el catálogo)
-ANIO_ACTUAL = 2017                        # último año completo: estado "actual" para predecir 2018
+ANIO_MIN, ANIO_MAX_ENTRADA = 1994, 2024   # años t con etiqueta (1993 y 2026 son años parciales del catálogo)
+ANIO_ACTUAL = 2025                        # último año completo: estado "actual" para predecir 2026
+ANIO_PROYECCION = 2027                    # horizonte de la proyección probabilística
 UMBRAL_MEDIO, UMBRAL_ALTO = 3.0, 4.0      # magnitud máxima del año t+1: <3 Bajo · 3–<4 Medio · ≥4 Alto
 ETIQUETAS_RIESGO = {1: "Bajo", 2: "Medio", 3: "Alto"}
 COLORES_RIESGO = {1: "#2ecc71", 2: "#f1c40f", 3: "#e74c3c"}
@@ -38,7 +38,7 @@ OBJETIVO = "CATEGORIA_RIESGO"
 # ---------------------------------------------------------------- Variables (panel municipio-año)
 VARS_SISMICAS = [  # historial del catálogo SGC hasta el año t
     "n_sismos", "n_sismos_m3", "mag_media", "mag_max", "profundidad_media", "frac_someros",
-    "rms_medio", "gap_medio", "fases_medias", "energia_log10",
+    "rms_medio", "gap_medio", "fases_medias", "error_lat_medio", "error_prof_medio", "energia_log10",
     "n_m3_prev3", "mag_max_prev3", "tendencia_m3", "anios_desde_m4",
 ]
 VARS_TERRITORIALES = [  # estáticas por municipio

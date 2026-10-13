@@ -34,13 +34,16 @@ def generar_ficha(d: dict) -> str:
 <h1>{escape(d['municipio'])}</h1>
 <p>Índice de Riesgo Integral: <b>{d['iri']:.1f}/100</b> · nivel {_chip(d['nivel'])} · puesto <b>{d['ranking']} de {d['total']}</b> en Santander</p>
 <h2>Indicadores</h2><table>{filas}</table>
+<h2>Decisión recomendada</h2>
+<p><b>{escape(d['decision'])}</b></p>
+<p style='color:#4b5d73;font-size:14px'>{escape(d['porque'])}</p>
 <h2>Actividad sísmica reciente</h2>
-<p>Últimos 12 meses (USGS, M≥4): <b>{d['obs12']}</b> observados frente a <b>{d['esp12']}</b> esperados &nbsp;{_chip(d['semaforo'])}</p>
+<p>Últimos 12 meses (catálogo SGC, M≥4): <b>{d['obs12']}</b> observados frente a <b>{d['esp12']}</b> esperados &nbsp;{_chip(d['semaforo'])}</p>
 <h2>Proyección</h2>
-<p>Probabilidad de al menos un sismo M≥4 en el municipio entre 2018 y 2027: <b>{d['p2027']:.0%}</b>.<br>
+<p>Probabilidad de al menos un sismo M≥4 en el municipio entre {d['anio_ini']} y {d['anio_fin']}: <b>{d['p2027']:.0%}</b>.<br>
 Categoría esperada para el próximo año (modelo Random Forest): <b>{escape(d['clase_rf'])}</b>.</p>
 <div class='aviso'><b>Cómo leer esta ficha.</b> El índice es relativo y sirve para priorizar; no estima daños ni víctimas. Un sismo
 concreto no se puede predecir: las probabilidades describen la tasa histórica. El tipo de suelo es una estimación a partir de la pendiente.</div>
-<p class='pie'>Fuentes: SGC (catálogo y amenaza sísmica 2020), DANE (población 2025 y límites), USGS (actividad reciente), GEM (fallas),
+<p class='pie'>Fuentes: SGC (catálogo sísmico y amenaza sísmica 2020), DANE (población 2025 y límites), GEM (fallas),
 SRTM (relieve). Generado por Sismo-Risk Santander · Hackathon CIAI UTSmart 2026.</p>
 </body></html>"""

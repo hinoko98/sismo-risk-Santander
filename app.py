@@ -13,7 +13,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from folium.plugins import HeatMap, MarkerCluster
-from shapely.geometry import Point, shape
+from shapely.geometry import mapping, shape
 from streamlit_folium import st_folium
 
 from src.config import (
@@ -58,7 +58,11 @@ def cargar_datos() -> tuple[pd.DataFrame | None, pd.DataFrame | None, dict, str 
 @st.cache_data(show_spinner=False)
 def cargar_municipios_geo() -> dict | None:
     try:
-        return json.loads(RUTA_MUNICIPIOS.read_text(encoding="utf-8"))
+        geo = json.loads(RUTA_MUNICIPIOS.read_text(encoding="utf-8"))
+        for f in geo["features"]:  # se simplifica la geometría (~200 m) y se envían solo los campos necesarios
+            f["geometry"] = mapping(shape(f["geometry"]).simplify(0.002, preserve_topology=True))
+            f["properties"] = {k: f["properties"][k] for k in ("municipio", "poblacion")}
+        return geo
     except Exception:
         logging.exception("No se pudo leer los municipios")
         return None
@@ -156,24 +160,19 @@ if err_modelo:
 actual = panel[panel["anio"] == ANIO_ACTUAL].reset_index(drop=True)
 etiquetado = panel.dropna(subset=[OBJETIVO]).copy()
 etiquetado["riesgo_etiqueta"] = etiquetado[OBJETIVO].astype(int).map(ETIQUETAS_RIESGO)
-polys = {f["properties"]["municipio"]: shape(f["geometry"]) for f in geo_mun["features"]} if geo_mun else {}
 if "predicciones" not in st.session_state:
     st.session_state.predicciones = []
-
-
-def municipio_en(lat: float, lon: float) -> str | None:
-    p = Point(lon, lat)
-    return next((m for m, g in polys.items() if g.contains(p)), None)
 
 
 # ------------------------------------------------------------------ Sidebar: simulador
 with st.sidebar:
     st.header("🎛️ Simulador de riesgo")
-    st.caption(f"Elige un punto de Santander y un escenario para el último año. El modelo estima el nivel de riesgo "
-               f"sísmico del municipio para el año siguiente. Las variables del terreno y la población se toman de las fuentes oficiales.")
+    st.caption("Elige un municipio y un escenario para el último año. El modelo estima el nivel de riesgo sísmico del "
+               "municipio para el año siguiente. Las variables del terreno y la población se toman de las fuentes oficiales.")
     with st.form("form_simulador"):
-        lat = st.number_input("Latitud", 5.70, 8.14, 7.119, 0.001, format="%.4f")
-        lon = st.number_input("Longitud", -74.55, -72.35, -73.122, 0.001, format="%.4f")
+        municipios_lista = sorted(actual["municipio"])
+        mun = st.selectbox("Municipio", municipios_lista,
+                           index=municipios_lista.index("Bucaramanga") if "Bucaramanga" in municipios_lista else 0)
         mag = st.slider("Magnitud máxima del año en curso", 1.0, 7.5, 4.0, 0.1)
         n3 = st.slider("Sismos M≥3 en el año en curso", 0, 400, 10)
         prof = st.slider("Profundidad media (km)", 1.0, 200.0, 30.0, 1.0,
@@ -182,10 +181,7 @@ with st.sidebar:
 
     if enviar:
         try:
-            mun = municipio_en(lat, lon)
-            if mun is None:
-                st.error("Las coordenadas quedan fuera del departamento de Santander.")
-            elif artefacto is None:
+            if artefacto is None:
                 st.error("Modelo no disponible.")
             else:
                 fila = actual[actual["municipio"] == mun].iloc[0].to_dict()
@@ -193,7 +189,8 @@ with st.sidebar:
                              "n_sismos": max(fila["n_sismos"], n3), "frac_someros": float(prof < 30),
                              "anios_desde_m4": 0 if mag >= 4 else fila["anios_desde_m4"]})
                 clase, probs = predecir(artefacto, fila)
-                st.session_state.predicciones.append({"lat": lat, "lon": lon, "mag": mag, "clase": clase, "municipio": mun})
+                st.session_state.predicciones.append({"lat": fila["latitud"], "lon": fila["longitud"], "mag": mag,
+                                                      "clase": clase, "municipio": mun})
                 st.session_state.ultima = (clase, probs, mun, fila)
         except Exception as exc:
             st.error(f"No se pudo calcular la predicción: {exc}")
@@ -209,10 +206,11 @@ with st.sidebar:
         st.rerun()
 
 # ------------------------------------------------------------------ Tabs
-tab_eda, tab_mapa, tab_sup, tab_uns, tab_rl, tab_proy, tab_cumple = st.tabs(
-    ["📊 Exploración (EDA)", "🗺️ Mapa de riesgo", "🎯 Supervisado", "🧩 No supervisado", "🤖 Refuerzo", "🔭 Proyección 2027", "✅ Cumplimiento"])
+VISTAS = ["📊 Exploración (EDA)", "🗺️ Mapa de riesgo", "🎯 Supervisado", "🧩 No supervisado", "🤖 Refuerzo", "🔭 Proyección 2027"]
+# En vez de st.tabs: Streamlit ejecuta todas las pestañas a la vez y un mapa en una pestaña oculta se queda en blanco.
+vista = st.segmented_control("Sección", VISTAS, default=VISTAS[0], key="vista", label_visibility="collapsed") or VISTAS[0]
 
-with tab_eda:
+if vista == VISTAS[0]:
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Sismos SGC en Santander", f"{len(eventos):,}")
     k2.metric("Periodo", f"{int(eventos['anio'].min())}–{int(eventos['anio'].max())}")
@@ -278,11 +276,11 @@ entrada se calculan con datos hasta el año *t*, por lo que ninguna revela la cl
 | distancia_bucaramanga_km | Calculada desde el centroide municipal a Bucaramanga (zona de interés) |
 """)
 
-with tab_mapa:
+if vista == VISTAS[1]:
     try:
         capa = st.radio("Colorear municipios por", ["Riesgo esperado para el año siguiente (Random Forest)", "Grupo (K-Means)"],
                         horizontal=True)
-        mapa = folium.Map(location=CENTRO_SANTANDER, zoom_start=8, tiles="OpenStreetMap")
+        mapa = folium.Map(location=CENTRO_SANTANDER, zoom_start=8, tiles="OpenStreetMap", prefer_canvas=True)
         color_mun = {}
         if capa.startswith("Riesgo") and artefacto is not None:
             pr = predecir_todos(artefacto, actual).set_index("municipio")
@@ -303,7 +301,7 @@ with tab_mapa:
                   .groupby(["la", "lo"]).size().reset_index(name="n"))
         celdas["w"] = np.log1p(celdas["n"]) / np.log1p(celdas["n"]).max()
         HeatMap(celdas[["la", "lo", "w"]].values.tolist(), name="Calor histórico (densidad de sismos)",
-                radius=14, blur=18, min_opacity=0.3).add_to(mapa)
+                radius=14, blur=18, min_opacity=0.3, show=False).add_to(mapa)  # apagado: se activa en el control de capas
         grupo = MarkerCluster(name="Mayores sismos (M≥5)").add_to(mapa)
         for r in eventos.nlargest(400, "magnitud").query("magnitud >= 5").itertuples():
             folium.CircleMarker([r.latitud, r.longitud], radius=3 + r.magnitud, color="#c0392b", fill=True, fill_opacity=0.7,
@@ -314,12 +312,17 @@ with tab_mapa:
                           icon=folium.Icon(color={1: "green", 2: "beige", 3: "red"}[p["clase"]], icon="bolt", prefix="fa"),
                           tooltip=f"{p['municipio']}: {ETIQUETAS_RIESGO[p['clase']]} (escenario M{p['mag']})").add_to(capa_pred)
         folium.LayerControl().add_to(mapa)
-        st_folium(mapa, height=620, width=1400, returned_objects=[])
+        leyenda = "".join(f"<div><span style='background:{c};width:12px;height:12px;display:inline-block;margin-right:6px;"
+                          f"border-radius:2px'></span>{n}</div>" for n, c in COLOR_ETQ.items())
+        mapa.get_root().html.add_child(folium.Element(
+            "<div style='position:fixed;bottom:24px;left:24px;z-index:9999;background:white;padding:8px 12px;"
+            f"border-radius:6px;box-shadow:0 0 6px rgba(0,0,0,.3);font-size:13px'><b>Riesgo</b>{leyenda}</div>"))
+        st_folium(mapa, height=620, width=1400, returned_objects=[], key=f"mapa_riesgo_{capa[:6]}_{len(st.session_state.predicciones)}")
         st.caption(f"{len(st.session_state.predicciones)} predicción(es) en el mapa. Usa el panel lateral para añadir más.")
     except Exception as exc:
         st.error(f"No se pudo dibujar el mapa: {exc}")
 
-with tab_sup:
+if vista == VISTAS[2]:
     st.subheader("Aprendizaje supervisado · Random Forest")
     if artefacto is None:
         st.warning("El modelo no está disponible.")
@@ -375,7 +378,7 @@ with tab_sup:
         st.caption("La categoría mide la magnitud máxima esperada en el municipio, es decir, amenaza sísmica próxima; "
                    "la exposición de la población se usa en la pestaña de refuerzo para priorizar.")
 
-with tab_uns:
+if vista == VISTAS[3]:
     st.subheader("Aprendizaje no supervisado · K-Means + PCA")
     k = st.slider("Número de grupos", 2, 6, 3)
     tabla, diag, err = cargar_agrupamiento(k)
@@ -402,7 +405,7 @@ with tab_uns:
         for g in [x for x in ORDEN_ETQ if x in set(tabla["grupo"])] or sorted(set(tabla["grupo"])):
             st.markdown(f"- **{g}** ({(tabla['grupo'] == g).sum()}): " + ", ".join(sorted(tabla.loc[tabla["grupo"] == g, "municipio"])))
 
-with tab_rl:
+if vista == VISTAS[4]:
     st.subheader("Aprendizaje por refuerzo · priorización de evaluaciones con presupuesto")
     agente, err_rl = cargar_agente(panel)
     if err_rl or agente is None:
@@ -429,7 +432,7 @@ with tab_rl:
                                                     "poblacion": "Población", "sismos_M3_prom_3a": "Sismos M≥3 prom. 3 años"}).round(2)
         st.dataframe(pri.head(15), hide_index=True, width="stretch")
 
-with tab_proy:
+if vista == VISTAS[5]:
     st.subheader("Proyección probabilística hasta 2027")
     res, err_p = cargar_proyeccion()
     if err_p or res is None:
@@ -452,7 +455,7 @@ with tab_proy:
                 from branca.colormap import linear
                 cmap = linear.YlOrRd_09.scale(0, 1)
                 cmap.caption = "Probabilidad"
-                mp = folium.Map(location=CENTRO_SANTANDER, zoom_start=8, tiles="OpenStreetMap")
+                mp = folium.Map(location=CENTRO_SANTANDER, zoom_start=8, tiles="OpenStreetMap", prefer_canvas=True)
                 if geo_mun:
                     folium.GeoJson(
                         geo_mun,
@@ -503,36 +506,3 @@ with tab_proy:
                        "el USGS ubica muchos eventos del Nido de Bucaramanga en Aratoca, Piedecuesta o Cepitá, mientras el SGC los asigna a Los Santos. "
                        "Además, el SGC usa magnitud local (Ml) y el USGS mayormente mb. Por eso conviene leer la proyección municipal como orden de "
                        "magnitud y no como valor exacto.")
-
-
-with tab_cumple:
-    st.subheader("Cumplimiento de los retos de la hackatón")
-    st.caption("Los números de esta tabla se calculan en vivo con los datos y modelos cargados en la app.")
-    _, diag_k, _ = cargar_agrupamiento(3)
-    n_vars_uns = diag_k.get("n_variables", "—")
-    agente_ok, _ = cargar_agente(panel)
-    m_sup = artefacto["metricas"] if artefacto else {}
-    fuga_ok = "mag_max_siguiente" not in VARIABLES and OBJETIVO not in VARIABLES
-    filas = [
-        ("Básico", "Aprendizaje supervisado sobre el catálogo SGC", "Random Forest + datos SGC", "Pestaña 🎯 Supervisado", "✅"),
-        ("Básico", "Mínimo 10 variables", f"{len(VARIABLES)} variables de entrada", "Pestaña 📊 EDA (KPI «Variables») y 🎯 Supervisado (importancias)", "✅" if len(VARIABLES) >= 10 else "❌"),
-        ("Básico", "Clase Bajo/Medio/Alto con criterio reproducible", f"Mag. máx. del año siguiente: <{UMBRAL_MEDIO} · <{UMBRAL_ALTO} · ≥{UMBRAL_ALTO}", "Pestaña 📊 EDA (cuadro de definición de la etiqueta)", "✅"),
-        ("Básico", "Sin variables de entrada que revelen la etiqueta",
-         "La etiqueta usa solo el año t+1 y las entradas solo hasta t" if fuga_ok else "Revisar", "Pestaña 🎯 Supervisado: evaluación temporal (entrena 1994–2011, prueba 2012–2016) y comparación con líneas base", "✅" if fuga_ok else "❌"),
-        ("Básico", "Métricas y manejo del desbalance",
-         f"Accuracy {m_sup.get('accuracy', 0):.1%} · F1 {m_sup.get('f1_score', 0):.1%} · class_weight='balanced'" if m_sup else "—", "Pestaña 🎯 Supervisado (métricas y matriz de confusión)", "✅" if m_sup else "❌"),
-        ("Medio", "Aprendizaje no supervisado", "K-Means + PCA (sin usar la etiqueta)", "Pestaña 🧩 No supervisado", "✅"),
-        ("Medio", "Mínimo 15 variables", f"{n_vars_uns} variables por municipio", "Pestaña 🧩 No supervisado (texto superior)", "✅" if isinstance(n_vars_uns, int) and n_vars_uns >= 15 else "❌"),
-        ("Medio", "Fuentes SGC + DANE + IGAC y variables sugeridas",
-         "Frecuencia, magnitud media/máx., profundidad, población, área, coordenadas y PGA", "Pestaña 📊 EDA → «Fuentes de datos»", "✅"),
-        ("Avanzado", "Aprendizaje por refuerzo", "Q-learning tabular con presupuesto", "Pestaña 🤖 Refuerzo (curva de aprendizaje y comparación)", "✅" if agente_ok else "❌"),
-        ("Avanzado", "Mínimo 20 variables", f"{len(VARIABLES)} variables en el entorno; el estado del agente combina 6 de ellas", "Pestaña 🤖 Refuerzo", "✅" if len(VARIABLES) >= 20 else "❌"),
-        ("Avanzado", "Resultados anteriores + fuente territorial oficial",
-         "El estado incluye el grupo K-Means (reto medio), la amenaza PGA del SGC, población DANE y área/distancia del MGN", "Pestaña 🤖 Refuerzo (texto superior)", "✅"),
-        ("Avanzado", "Costos simulados de evaluación", "Costo = 2 + área/500 + distancia a Bucaramanga/50 (unidades relativas, SIMULADO)", "Pestaña 🤖 Refuerzo (aviso en el texto superior)", "✅"),
-        ("General", "Datos sísmicos reales del SGC", f"{len(eventos):,} eventos reales dentro de Santander ({int(eventos['anio'].min())}–{int(eventos['anio'].max())})", "Pestaña 📊 EDA (KPIs)", "✅"),
-    ]
-    st.dataframe(pd.DataFrame(filas, columns=["Fase", "Requisito", "Evidencia en la app", "Dónde verlo", "Estado"]),
-                 hide_index=True, width="stretch")
-    st.info("Limitaciones que conviene declarar: la categoría mide amenaza sísmica próxima (no daños); el tipo de suelo es una estimación "
-            "topográfica; el costo del reto avanzado es simulado; el catálogo del SGC termina en marzo de 2018.")

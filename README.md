@@ -40,4 +40,5 @@ Unidad: **municipio-año**. Las variables de entrada usan información hasta el 
 - Falta el municipio de Jordán (no se halló su polígono en la capa de límites).
 - La categoría mide amenaza sísmica próxima, no daños; la exposición (población) entra en el reto de refuerzo.
 - El costo y la escala de beneficio del agente de refuerzo son **simulados** (unidades relativas).
+- **Navegación:** la app muestra una sección a la vez (no `st.tabs`) para que los mapas se dibujen bien.
 - **Proyección a 2027:** es una extrapolación de tasas (Poisson estacionario), no una predicción de eventos. El SGC reportaba magnitudes más altas antes de 2008, por eso λ usa solo 2008–2017. En la validación (USGS 2019–2025) el total departamental coincide (337 observados vs 302 esperados), pero la distribución por municipio es sensible a la agencia: el USGS ubica parte del Nido de Bucaramanga en Aratoca/Piedecuesta y el SGC en Los Santos.

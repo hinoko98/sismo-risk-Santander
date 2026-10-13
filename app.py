@@ -18,7 +18,7 @@ from streamlit_folium import st_folium
 
 from src.config import (
     ANIO_ACTUAL, AZUL_MARCA, CENTRO_SANTANDER, COLORES_RIESGO, ETIQUETAS_RIESGO, NARANJA_MARCA, OBJETIVO,
-    RUTA_AGENTE_RL, RUTA_ICONO, RUTA_LOGO, RUTA_MODELO, RUTA_MUNICIPIOS, RUTA_PANEL, RUTA_SISMOS_LIMPIO,
+    RUTA_AGENTE_RL, RUTA_ICONO, RUTA_USGS, RUTA_LOGO, RUTA_MODELO, RUTA_MUNICIPIOS, RUTA_PANEL, RUTA_SISMOS_LIMPIO,
     UMBRAL_ALTO, UMBRAL_MEDIO, VARIABLES, VARS_SISMICAS, VARS_TERRITORIALES,
 )
 from src.model_training import entrenar, predecir
@@ -104,6 +104,21 @@ def cargar_agente(_panel: pd.DataFrame | None) -> tuple[dict | None, str | None]
         return entrenar_y_guardar(_panel), None
     except Exception as exc:
         logging.exception("Fallo con el agente RL")
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+@st.cache_data(show_spinner="Calculando proyección…")
+def cargar_proyeccion() -> tuple[dict | None, str | None]:
+    """Tasas de Poisson por municipio, proyección a 2027 y validación con sismos reales del USGS."""
+    try:
+        import geopandas as gpd
+        from src.proyeccion import clases_anuales, estimar_tasas, proyectar, validar
+        mun = gpd.read_file(RUTA_MUNICIPIOS)
+        tasas = clases_anuales(estimar_tasas(pd.read_csv(RUTA_SISMOS_LIMPIO), sorted(mun["municipio"])))
+        val = validar(tasas, pd.read_csv(RUTA_USGS), mun) if RUTA_USGS.exists() else None
+        return {"tasas": tasas, "proy": proyectar(tasas, 2027), "val": val}, None
+    except Exception as exc:
+        logging.exception("Fallo en la proyección")
         return None, f"{type(exc).__name__}: {exc}"
 
 
@@ -194,8 +209,8 @@ with st.sidebar:
         st.rerun()
 
 # ------------------------------------------------------------------ Tabs
-tab_eda, tab_mapa, tab_sup, tab_uns, tab_rl = st.tabs(
-    ["📊 Exploración (EDA)", "🗺️ Mapa de riesgo", "🎯 Supervisado", "🧩 No supervisado", "🤖 Refuerzo"])
+tab_eda, tab_mapa, tab_sup, tab_uns, tab_rl, tab_proy = st.tabs(
+    ["📊 Exploración (EDA)", "🗺️ Mapa de riesgo", "🎯 Supervisado", "🧩 No supervisado", "🤖 Refuerzo", "🔭 Proyección 2027"])
 
 with tab_eda:
     k1, k2, k3, k4, k5 = st.columns(5)
@@ -413,3 +428,78 @@ with tab_rl:
         pri = agente["prioridades"].rename(columns={"ventaja_evaluar": "Ventaja de evaluar", "costo_simulado": "Costo (simulado)",
                                                     "poblacion": "Población", "sismos_M3_prom_3a": "Sismos M≥3 prom. 3 años"}).round(2)
         st.dataframe(pri.head(15), hide_index=True, width="stretch")
+
+with tab_proy:
+    st.subheader("Proyección probabilística hasta 2027")
+    res, err_p = cargar_proyeccion()
+    if err_p or res is None:
+        st.error(f"No fue posible calcular la proyección: {err_p}")
+    else:
+        st.markdown(
+            "El catálogo del SGC termina en marzo de 2018, y **un sismo concreto no se puede predecir**. Lo que sí se puede es proyectar la "
+            "**probabilidad** de que ocurra al menos uno en cada municipio, a partir de su tasa histórica (modelo de Poisson: P = 1 − e^(−λ·T)). "
+            "λ se estima con la última década completa (2008–2017), porque antes de 2008 el SGC reportaba magnitudes más altas, y se suaviza hacia el "
+            "promedio departamental en municipios con pocos eventos. Supone una actividad estacionaria: no modela réplicas ni cambios del régimen sísmico.")
+        proy, tasas = res["proy"], res["tasas"]
+        c1, c2 = st.columns([2, 1])
+        with c2:
+            anio_p = st.slider("Año objetivo", ANIO_ACTUAL + 1, 2027, 2027)
+            medida = st.radio("Medida", ["Probabilidad acumulada desde 2018 (≥1 sismo M≥4)", "Probabilidad solo en ese año (≥1 sismo M≥4)"])
+        col = "p_acum_m4" if medida.startswith("Probabilidad acum") else "p_anual_m4"
+        d = proy[proy["anio"] == anio_p].set_index("municipio")
+        with c1:
+            try:
+                from branca.colormap import linear
+                cmap = linear.YlOrRd_09.scale(0, 1)
+                cmap.caption = "Probabilidad"
+                mp = folium.Map(location=CENTRO_SANTANDER, zoom_start=8, tiles="OpenStreetMap")
+                if geo_mun:
+                    folium.GeoJson(
+                        geo_mun,
+                        style_function=lambda f: {"color": "#555", "weight": 0.7, "fillOpacity": 0.7,
+                                                  "fillColor": cmap(float(d[col].get(f["properties"]["municipio"], 0)))},
+                        tooltip=folium.GeoJsonTooltip(fields=["municipio"], aliases=["Municipio"]),
+                    ).add_to(mp)
+                cmap.add_to(mp)
+                st_folium(mp, height=480, width=900, returned_objects=[], key=f"mapa_proy_{anio_p}_{col}")
+            except Exception as exc:
+                st.error(f"No se pudo dibujar el mapa de proyección: {exc}")
+        m_sel = st.selectbox("Municipio", sorted(tasas["municipio"]), index=sorted(tasas["municipio"]).index("Bucaramanga"))
+        serie = proy[proy["municipio"] == m_sel]
+        t_m = tasas[tasas["municipio"] == m_sel].iloc[0]
+        a, b, c = st.columns(3)
+        a.metric("Sismos M≥4 esperados por año", f"{t_m['lambda_m4']:.2f}")
+        b.metric(f"Prob. acumulada de ≥1 M≥4 a {anio_p}", f"{float(serie[serie['anio'] == anio_p]['p_acum_m4'].iloc[0]):.0%}")
+        c.metric("Clase más probable en un año", t_m["clase_probable"])
+        fig = px.line(serie.melt("anio", ["p_acum_m4", "p_acum_m3"], var_name="Evento", value_name="Probabilidad")
+                      .replace({"p_acum_m4": "≥1 sismo M≥4", "p_acum_m3": "≥1 sismo M≥3"}),
+                      x="anio", y="Probabilidad", color="Evento", markers=True, range_y=[0, 1.02],
+                      title=f"{m_sel}: probabilidad acumulada desde 2018", color_discrete_sequence=[NARANJA_MARCA, AZUL_MARCA])
+        st.plotly_chart(fig, width="stretch")
+        top = d.reset_index().sort_values(col, ascending=False).head(15)[["municipio", col, "esperados_m4"]]
+        st.markdown(f"**Municipios con mayor probabilidad a {anio_p}**")
+        st.dataframe(top.rename(columns={col: "Probabilidad", "esperados_m4": "Sismos M≥4 esperados (acum.)"}).round(3),
+                     hide_index=True, width="stretch")
+
+        v = res["val"]
+        st.divider()
+        st.subheader("¿Qué tan bien habría funcionado? Validación con sismos reales")
+        if v is None:
+            st.info("Falta data/usgs_santander.csv (ejecuta `python -m src.real_data`).")
+        else:
+            st.markdown(f"Se compara la proyección con los sismos M≥4 **realmente registrados por el USGS en {v['anios']}**, "
+                        "años que no se usaron para estimar λ.")
+            a, b, c = st.columns(3)
+            a.metric("Sismos M≥4 observados / esperados", f"{v['observados_total']} / {v['esperados_total']:.0f}")
+            b.metric("Correlación entre municipios (Spearman)", f"{v['spearman_municipios']:.2f}")
+            c.metric("Mejora sobre una probabilidad uniforme (Brier)", f"{v['habilidad_brier']:.0%}")
+            pa = v["por_anio"].melt("anio", ["observados", "esperados"], var_name="Serie", value_name="Sismos M≥4")
+            st.plotly_chart(px.bar(pa[pa["Serie"] == "observados"], x="anio", y="Sismos M≥4", title="Sismos M≥4 por año en Santander: observados (USGS) vs. esperados",
+                                   color_discrete_sequence=[AZUL_MARCA]).add_hline(y=float(v["por_anio"]["esperados"].iloc[0]),
+                                   line_color=NARANJA_MARCA, annotation_text="esperados (proyección)"), width="stretch")
+            tv = v["tabla_municipios"].sort_values("observados", ascending=False).head(8).round(1)
+            st.dataframe(tv.rename(columns={"esperados": "Esperados", "observados": "Observados (USGS)"}), hide_index=True, width="stretch")
+            st.warning("El **total** departamental coincide razonablemente, pero la **distribución por municipio** es sensible a la agencia: "
+                       "el USGS ubica muchos eventos del Nido de Bucaramanga en Aratoca, Piedecuesta o Cepitá, mientras el SGC los asigna a Los Santos. "
+                       "Además, el SGC usa magnitud local (Ml) y el USGS mayormente mb. Por eso conviene leer la proyección municipal como orden de "
+                       "magnitud y no como valor exacto.")

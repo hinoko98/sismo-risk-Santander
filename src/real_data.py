@@ -33,7 +33,7 @@ from scipy.spatial import cKDTree
 from shapely.geometry import Point
 
 from .config import (
-    BBOX_SANTANDER, DIR_DATOS, RUTA_MUNICIPIOS, RUTA_POLIGONO_IGAC, RUTA_SISMOS_BRUTO, RUTA_SITIOS,
+    BBOX_SANTANDER, DIR_DATOS, RUTA_MUNICIPIOS, RUTA_USGS, RUTA_POLIGONO_IGAC, RUTA_SISMOS_BRUTO, RUTA_SITIOS,
 )
 
 log = logging.getLogger(__name__)
@@ -176,6 +176,21 @@ def descargar_catalogo_sgc() -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df.to_csv(RUTA_SISMOS_BRUTO, index=False)
     return df
+
+
+def descargar_usgs() -> pd.DataFrame:
+    """Sismos reales del USGS (M≥3,5, bounding box de Santander) hasta hoy.
+
+    Sirve para validar la proyección con eventos posteriores a marzo de 2018, que es donde termina la
+    Consulta Experta del SGC. Las magnitudes del USGS (mayormente mb) no son idénticas a las del SGC (Ml).
+    """
+    lat0, lat1, lon0, lon1 = BBOX_SANTANDER
+    r = _get("https://earthquake.usgs.gov/fdsnws/event/1/query", params={
+        "format": "csv", "minlatitude": lat0, "maxlatitude": lat1, "minlongitude": lon0, "maxlongitude": lon1,
+        "starttime": "1993-01-01", "endtime": pd.Timestamp.today().strftime("%Y-%m-%d"),
+        "minmagnitude": 3.5, "orderby": "time-asc"})
+    RUTA_USGS.write_bytes(r.content)
+    return pd.read_csv(RUTA_USGS)
 
 
 # ------------------------------------------------------------------ 2. Límites (DANE MGN) y población (DANE)
@@ -431,6 +446,7 @@ if __name__ == "__main__":
     mun = construir_municipios()
     print("Municipios:", len(mun), "población:", int(mun["poblacion"].sum()))
     guardar_poligono_santander(mun)
+    print("USGS:", len(descargar_usgs()), "eventos")
     sit = construir_sitios()
     print("Sitios:", sit.shape)
     print(sit.describe().T.to_string())

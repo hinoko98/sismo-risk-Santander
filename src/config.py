@@ -12,6 +12,7 @@ DIR_MODELOS = RAIZ / "models"
 DIR_ASSETS = RAIZ / "assets"
 
 RUTA_SISMOS_BRUTO = DIR_DATOS / "sismos_SGC.csv"                # catálogo SGC (Consulta Experta)
+RUTA_USGS = DIR_DATOS / "usgs_santander.csv"                       # sismos reales M≥3,5 del USGS (validación posterior a 2018)
 RUTA_SITIOS = DIR_DATOS / "sitios_santander.csv"                # variables de terreno por celda de ~2 km
 RUTA_MUNICIPIOS = DIR_DATOS / "municipios_santander.geojson"    # polígonos MGN-DANE + población DANE
 RUTA_POLIGONO_IGAC = DIR_DATOS / "santander_poligono.geojson"   # unión de municipios

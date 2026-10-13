@@ -155,7 +155,12 @@ def cargar_decision() -> tuple[dict | None, str | None]:
         cat, fuente = monitor.cargar_catalogo(mun, en_vivo=True)
         act, fin = monitor.evaluar_actividad(cat, lista)
         base = monitor.tasas_base(cat, lista)
+        def evento(fila):
+            return {"time": fila["time"], "mag": float(fila["mag"]), "prof": float(fila["profundidad_km"]), "municipio": fila["municipio"],
+                    "lat": float(fila["latitud"]), "lon": float(fila["longitud"])}
+        cat_m4 = cat[cat["mag"] >= 4]
         return {"iri": iri, "act": act, "fin": fin, "fuente": fuente,
+                "ultimo": evento(cat.iloc[-1]), "ultimo_m4": evento(cat_m4.iloc[-1]) if len(cat_m4) else None,
                 "serie": monitor.serie_mensual(cat, float(base.sum()))}, None
     except Exception as exc:
         logging.exception("Fallo en el centro de decisión")
@@ -590,6 +595,42 @@ if vista == V_DEC:
         k3.metric("Mayor Índice de Riesgo Integral", iri.iloc[0]["municipio"], f"{iri.iloc[0]['iri']:.0f}/100", delta_color="off")
         k4.metric("Último sismo del catálogo", f"{dec['fin']:%d-%m-%Y}")
         st.caption(f"Actividad reciente: {dec['fuente']}. Se actualiza sola cada hora si hay internet.")
+
+        def hace_cuanto(t: pd.Timestamp) -> str:
+            seg = (pd.Timestamp.utcnow().tz_localize(None) - t).total_seconds()
+            if seg < 3600:
+                return f"hace {max(int(seg // 60), 1)} min"
+            if seg < 2 * 86400:
+                return f"hace {int(seg // 3600)} h"
+            return f"hace {int(seg // 86400)} días"
+
+        def tarjeta_sismo(titulo: str, ev: dict | None):
+            """Ficha del evento: fecha, hora (UTC y local), magnitud, profundidad, lugar y población del municipio."""
+            st.markdown(f"**{titulo}**")
+            if ev is None:
+                st.caption("No hay eventos de esta clase en el catálogo.")
+                return
+            t = pd.Timestamp(ev["time"])
+            fila_m = tabla[tabla["municipio"] == ev["municipio"]]
+            pob = miles(fila_m["poblacion"].iloc[0]) if len(fila_m) else "—"
+            nivel = f"Nivel {fila_m['nivel'].iloc[0]}" if len(fila_m) else ""
+            campos = [
+                ("Fecha", f"{t:%d-%m-%Y}", hace_cuanto(t)),
+                ("Hora (UTC)", f"{t:%H:%M:%S}", f"{t - pd.Timedelta(hours=5):%H:%M:%S} hora local"),
+                ("Magnitud", f"{ev['mag']:.1f}".replace(".", ","), "escala del SGC"),
+                ("Profundidad", f"{ev['prof']:.0f} km", "superficial" if ev["prof"] < 70 else "intermedio"),
+                ("Lugar", ev["municipio"], f"{ev['lat']:.3f}, {ev['lon']:.3f}".replace(".", ",")),
+                ("Habitantes del municipio", pob, nivel),
+            ]
+            cajas = "".join(
+                f"<div style='flex:1 1 150px;background:#F2F5F9;border-radius:10px;padding:10px 14px'>"
+                f"<div style='font-size:12px;color:#5b6b7f'>{et}</div>"
+                f"<div style='font-size:21px;font-weight:600;color:{AZUL_MARCA};line-height:1.25'>{val}</div>"
+                f"<div style='font-size:12px;color:#7a8797'>{sub}</div></div>" for et, val, sub in campos)
+            st.markdown(f"<div style='display:flex;flex-wrap:wrap;gap:10px;margin:2px 0 14px 0'>{cajas}</div>", unsafe_allow_html=True)
+
+        tarjeta_sismo("🔔 Último sismo registrado", dec["ultimo"])
+        tarjeta_sismo("⚠️ Último sismo significativo (M≥4)", dec["ultimo_m4"])
 
         st.markdown("### 💬 Pregúntale al asistente de decisión")
         st.caption("Responde con los datos de esta plataforma (no inventa cifras). Elige una sugerencia o escribe tu pregunta abajo.")

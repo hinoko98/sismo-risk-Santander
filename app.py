@@ -209,8 +209,8 @@ with st.sidebar:
         st.rerun()
 
 # ------------------------------------------------------------------ Tabs
-tab_eda, tab_mapa, tab_sup, tab_uns, tab_rl, tab_proy = st.tabs(
-    ["📊 Exploración (EDA)", "🗺️ Mapa de riesgo", "🎯 Supervisado", "🧩 No supervisado", "🤖 Refuerzo", "🔭 Proyección 2027"])
+tab_eda, tab_mapa, tab_sup, tab_uns, tab_rl, tab_proy, tab_cumple = st.tabs(
+    ["📊 Exploración (EDA)", "🗺️ Mapa de riesgo", "🎯 Supervisado", "🧩 No supervisado", "🤖 Refuerzo", "🔭 Proyección 2027", "✅ Cumplimiento"])
 
 with tab_eda:
     k1, k2, k3, k4, k5 = st.columns(5)
@@ -503,3 +503,36 @@ with tab_proy:
                        "el USGS ubica muchos eventos del Nido de Bucaramanga en Aratoca, Piedecuesta o Cepitá, mientras el SGC los asigna a Los Santos. "
                        "Además, el SGC usa magnitud local (Ml) y el USGS mayormente mb. Por eso conviene leer la proyección municipal como orden de "
                        "magnitud y no como valor exacto.")
+
+
+with tab_cumple:
+    st.subheader("Cumplimiento de los retos de la hackatón")
+    st.caption("Los números de esta tabla se calculan en vivo con los datos y modelos cargados en la app.")
+    _, diag_k, _ = cargar_agrupamiento(3)
+    n_vars_uns = diag_k.get("n_variables", "—")
+    agente_ok, _ = cargar_agente(panel)
+    m_sup = artefacto["metricas"] if artefacto else {}
+    fuga_ok = "mag_max_siguiente" not in VARIABLES and OBJETIVO not in VARIABLES
+    filas = [
+        ("Básico", "Aprendizaje supervisado sobre el catálogo SGC", "Random Forest + datos SGC", "Pestaña 🎯 Supervisado", "✅"),
+        ("Básico", "Mínimo 10 variables", f"{len(VARIABLES)} variables de entrada", "Pestaña 📊 EDA (KPI «Variables») y 🎯 Supervisado (importancias)", "✅" if len(VARIABLES) >= 10 else "❌"),
+        ("Básico", "Clase Bajo/Medio/Alto con criterio reproducible", f"Mag. máx. del año siguiente: <{UMBRAL_MEDIO} · <{UMBRAL_ALTO} · ≥{UMBRAL_ALTO}", "Pestaña 📊 EDA (cuadro de definición de la etiqueta)", "✅"),
+        ("Básico", "Sin variables de entrada que revelen la etiqueta",
+         "La etiqueta usa solo el año t+1 y las entradas solo hasta t" if fuga_ok else "Revisar", "Pestaña 🎯 Supervisado: evaluación temporal (entrena 1994–2011, prueba 2012–2016) y comparación con líneas base", "✅" if fuga_ok else "❌"),
+        ("Básico", "Métricas y manejo del desbalance",
+         f"Accuracy {m_sup.get('accuracy', 0):.1%} · F1 {m_sup.get('f1_score', 0):.1%} · class_weight='balanced'" if m_sup else "—", "Pestaña 🎯 Supervisado (métricas y matriz de confusión)", "✅" if m_sup else "❌"),
+        ("Medio", "Aprendizaje no supervisado", "K-Means + PCA (sin usar la etiqueta)", "Pestaña 🧩 No supervisado", "✅"),
+        ("Medio", "Mínimo 15 variables", f"{n_vars_uns} variables por municipio", "Pestaña 🧩 No supervisado (texto superior)", "✅" if isinstance(n_vars_uns, int) and n_vars_uns >= 15 else "❌"),
+        ("Medio", "Fuentes SGC + DANE + IGAC y variables sugeridas",
+         "Frecuencia, magnitud media/máx., profundidad, población, área, coordenadas y PGA", "Pestaña 📊 EDA → «Fuentes de datos»", "✅"),
+        ("Avanzado", "Aprendizaje por refuerzo", "Q-learning tabular con presupuesto", "Pestaña 🤖 Refuerzo (curva de aprendizaje y comparación)", "✅" if agente_ok else "❌"),
+        ("Avanzado", "Mínimo 20 variables", f"{len(VARIABLES)} variables en el entorno; el estado del agente combina 6 de ellas", "Pestaña 🤖 Refuerzo", "✅" if len(VARIABLES) >= 20 else "❌"),
+        ("Avanzado", "Resultados anteriores + fuente territorial oficial",
+         "El estado incluye el grupo K-Means (reto medio), la amenaza PGA del SGC, población DANE y área/distancia del MGN", "Pestaña 🤖 Refuerzo (texto superior)", "✅"),
+        ("Avanzado", "Costos simulados de evaluación", "Costo = 2 + área/500 + distancia a Bucaramanga/50 (unidades relativas, SIMULADO)", "Pestaña 🤖 Refuerzo (aviso en el texto superior)", "✅"),
+        ("General", "Datos sísmicos reales del SGC", f"{len(eventos):,} eventos reales dentro de Santander ({int(eventos['anio'].min())}–{int(eventos['anio'].max())})", "Pestaña 📊 EDA (KPIs)", "✅"),
+    ]
+    st.dataframe(pd.DataFrame(filas, columns=["Fase", "Requisito", "Evidencia en la app", "Dónde verlo", "Estado"]),
+                 hide_index=True, width="stretch")
+    st.info("Limitaciones que conviene declarar: la categoría mide amenaza sísmica próxima (no daños); el tipo de suelo es una estimación "
+            "topográfica; el costo del reto avanzado es simulado; el catálogo del SGC termina en marzo de 2018.")

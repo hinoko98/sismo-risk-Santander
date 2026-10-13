@@ -20,10 +20,10 @@ VARS_AGREGADAS = [
 VARS_AGRUPAMIENTO = VARS_AGREGADAS + VARS_TERRITORIALES
 
 
-def agregar_municipios(eventos: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
-    """Una fila por municipio: sismicidad 1994-2017 (derivada del catálogo) + variables territoriales."""
-    e = eventos[(eventos["anio"] >= ANIO_MIN) & (eventos["anio"] <= ANIO_ACTUAL)]
-    n_anios = ANIO_ACTUAL - ANIO_MIN + 1
+def agregar_municipios(eventos: pd.DataFrame, feats: pd.DataFrame, anio_max: int = ANIO_ACTUAL) -> pd.DataFrame:
+    """Una fila por municipio: sismicidad 1994-`anio_max` (derivada del catálogo) + variables territoriales."""
+    e = eventos[(eventos["anio"] >= ANIO_MIN) & (eventos["anio"] <= anio_max)]
+    n_anios = anio_max - ANIO_MIN + 1
     g = e.groupby("municipio").agg(
         n=("magnitud", "size"), n_m3=("magnitud", lambda s: (s >= 3).sum()), mag_media=("magnitud", "mean"),
         mag_max=("magnitud", "max"), profundidad_media=("profundidad_km", "mean"),

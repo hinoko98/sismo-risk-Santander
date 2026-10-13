@@ -3,7 +3,8 @@
 Problema: cada año se dispone de un presupuesto para enviar equipos técnicos de evaluación a algunos
 municipios. El agente ve los municipios en secuencia y decide EVALUAR o NO EVALUAR.
 
-  * Estado     : nivel de actividad reciente (M≥3 de los 3 años previos), población, costo y presupuesto restante.
+  * Estado     : actividad reciente (M≥3 de los 3 años previos), población expuesta, costo, presupuesto restante,
+                 amenaza estimada (PGA del SGC) y grupo del agrupamiento no supervisado (resultado del reto medio).
   * Recompensa : beneficio – costo.  El beneficio usa resultados REALES del año siguiente
                  (la categoría que el municipio tuvo) y la población real del DANE.
   * Costo      : SIMULADO (el reto lo permite): sube con el área del municipio y su lejanía de Bucaramanga.
@@ -30,7 +31,7 @@ def costo_simulado(area_km2, dist_bucaramanga_km):
 class EntornoEvaluacion:
     """Un episodio = un año; los municipios llegan en orden aleatorio."""
 
-    def __init__(self, panel: pd.DataFrame, referencia: pd.DataFrame):
+    def __init__(self, panel: pd.DataFrame, referencia: pd.DataFrame, grupos: dict):
         self.panel = panel
         pob_total = panel.drop_duplicates("municipio")["poblacion"].sum()
         panel = panel.assign(
@@ -39,7 +40,9 @@ class EntornoEvaluacion:
         )
         # Los cortes de los terciles se fijan con el periodo de entrenamiento (referencia)
         r = referencia.assign(costo=costo_simulado(referencia["area_km2"], referencia["distancia_bucaramanga_km"]))
-        self.cortes = {c: r[c].quantile([1 / 3, 2 / 3]).to_numpy() for c in ["n_m3_prev3", "poblacion", "costo"]}
+        self.cortes = {c: r[c].quantile([1 / 3, 2 / 3]).to_numpy()
+                       for c in ["n_m3_prev3", "poblacion", "costo", "PGA_medio"]}
+        self.grupos = grupos  # municipio -> 0 (Bajo) · 1 (Medio) · 2 (Alto), del K-Means
         self.panel = panel
 
     def _nivel(self, col, valor):
@@ -51,7 +54,8 @@ class EntornoEvaluacion:
 
     def estado(self, fila, restante):
         return (self._nivel("n_m3_prev3", fila["n_m3_prev3"]), self._nivel("poblacion", fila["poblacion"]),
-                self._nivel("costo", fila["costo"]), self.nivel_presupuesto(restante))
+                self._nivel("costo", fila["costo"]), self.nivel_presupuesto(restante),
+                self.grupos.get(fila["municipio"], 1), self._nivel("PGA_medio", fila["PGA_medio"]))
 
     @staticmethod
     def beneficio(fila):
@@ -82,13 +86,13 @@ def _episodio(entorno, anio, rng, politica, aprender=None):
     return {"recompensa": total, "beneficio": ben, "costo": usado, "altos_cubiertos": cubiertos_alto, "altos": n_alto}
 
 
-def entrenar_agente(panel: pd.DataFrame, anios_train: list[int], epocas: int = 400, seed: int = SEMILLA):
+def entrenar_agente(panel: pd.DataFrame, anios_train: list[int], grupos: dict, epocas: int = 400, seed: int = SEMILLA):
     """Q-learning ε-greedy sobre los años de entrenamiento. Devuelve (Q, entorno, curva de aprendizaje)."""
     rng = np.random.default_rng(seed)
     datos = panel.dropna(subset=[OBJETIVO])
     referencia = datos[datos["anio"].isin(anios_train)]
-    entorno = EntornoEvaluacion(datos, referencia)
-    Q = np.zeros((3, 3, 3, 3, 2))
+    entorno = EntornoEvaluacion(datos, referencia, grupos)
+    Q = np.zeros((3, 3, 3, 3, 3, 3, 2))
     curva = []
     for ep in range(epocas):
         eps = max(0.05, 1.0 - ep / (0.7 * epocas))
@@ -140,6 +144,16 @@ def prioridades(Q, entorno, panel_actual: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(filas).sort_values("ventaja_evaluar", ascending=False).reset_index(drop=True)
 
 
+def grupos_no_supervisados(anio_max: int) -> dict:
+    """Grupo K-Means (0 Bajo · 1 Medio · 2 Alto) de cada municipio usando SOLO sismicidad hasta `anio_max`,
+    para que el agente no vea información de los años de prueba."""
+    from .config import RUTA_MUN_FEATURES, RUTA_SISMOS_LIMPIO
+    from .unsupervised import agregar_municipios, agrupar
+    agg = agregar_municipios(pd.read_csv(RUTA_SISMOS_LIMPIO), pd.read_csv(RUTA_MUN_FEATURES), anio_max=anio_max)
+    tabla, _ = agrupar(agg, 3)
+    return {m: {"Bajo": 0, "Medio": 1, "Alto": 2}[g] for m, g in zip(tabla["municipio"], tabla["grupo"])}
+
+
 def entrenar_y_guardar(panel: pd.DataFrame, guardar: bool = True, epocas: int = 300) -> dict:
     """Entrena con los años antiguos, evalúa con los recientes y guarda el agente en models/."""
     import joblib
@@ -149,7 +163,8 @@ def entrenar_y_guardar(panel: pd.DataFrame, guardar: bool = True, epocas: int = 
     datos = panel.dropna(subset=[OBJETIVO])
     train, test = dividir_temporal(datos)
     anios_train, anios_test = sorted(train["anio"].unique().tolist()), sorted(test["anio"].unique().tolist())
-    Q, entorno, curva = entrenar_agente(panel, anios_train, epocas=epocas)
+    grupos = grupos_no_supervisados(max(anios_train))
+    Q, entorno, curva = entrenar_agente(panel, anios_train, grupos, epocas=epocas)
     resultado = {
         "Q": Q, "curva": curva, "anios_train": anios_train, "anios_test": anios_test,
         "comparacion": evaluar_politicas(Q, entorno, anios_test),

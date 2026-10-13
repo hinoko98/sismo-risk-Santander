@@ -154,15 +154,23 @@ def construir_panel(eventos: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
     h["CATEGORIA_RIESGO_NUM"] = np.digitize(h["mag_max_siguiente"].fillna(0), [UMBRAL_MEDIO, UMBRAL_ALTO]) + 1
 
     panel = h[(h["anio"] >= ANIO_MIN) & (h["anio"] <= ANIO_ACTUAL)].merge(feats, on="municipio", how="left")
-    # Huecos: años sin sismos -> no hubo magnitud/profundidad que promediar; se imputa con la mediana global
+    # Huecos: años sin sismos -> no hubo magnitud/profundidad que promediar. Se imputa con la mediana de lo
+    # observado HASTA ese año (nunca con años posteriores, para no filtrar información del futuro).
     for c in ["mag_media", "mag_max", "profundidad_media", "frac_someros", "rms_medio", "gap_medio", "fases_medias",
               "mag_max_prev3", "tendencia_m3", "n_m3_prev3"]:
-        panel[c] = panel[c].fillna(panel[c].median())
+        panel[c] = _imputar_solo_pasado(panel, c)
     panel[OBJETIVO] = panel["CATEGORIA_RIESGO_NUM"].astype(int)
     panel["riesgo_etiqueta"] = panel[OBJETIVO].map(ETIQUETAS_RIESGO)
     # El último año (2017) no tiene etiqueta (2018 incompleto): se conserva como estado actual
     panel.loc[panel["anio"] > ANIO_MAX_ENTRADA, [OBJETIVO, "riesgo_etiqueta", "mag_max_siguiente"]] = np.nan
     return panel.drop(columns="CATEGORIA_RIESGO_NUM")
+
+
+def _imputar_solo_pasado(panel: pd.DataFrame, col: str) -> pd.Series:
+    """Rellena los nulos de `col` con la mediana de los valores observados en años ≤ al de cada fila."""
+    mediana_hasta = {a: panel.loc[panel["anio"] <= a, col].median() for a in sorted(panel["anio"].unique())}
+    llenado = panel["anio"].map(mediana_hasta).fillna(0.0)  # sin observaciones previas: 0, no estadística futura
+    return panel[col].fillna(llenado)
 
 
 def _anios_desde_m4(mag_max: pd.Series) -> pd.Series:

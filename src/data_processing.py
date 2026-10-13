@@ -1,7 +1,11 @@
-"""Misión 1 (Nivel Básico): ETL y limpieza.
+"""Misión 1 (Nivel Básico): ETL, limpieza y construcción del dataset municipio-año.
 
-Carga el catálogo bruto (SGC + capas IGAC/DANE), imputa nulos, filtra espacialmente con
-geopandas y calcula la CATEGORIA_RIESGO cuando no existe.
+Flujo:
+  1. Carga el catálogo real del SGC y calcula la magnitud (Mw si existe, si no Ml).
+  2. Filtra espacialmente con geopandas: solo eventos dentro de los municipios de Santander.
+  3. Imputa nulos (mediana) y guarda el catálogo limpio.
+  4. Agrega variables territoriales por municipio (DANE, DEM, fallas GEM, PGA SGC, OSM).
+  5. Construye el panel municipio-año con variables hasta el año t y la etiqueta del año t+1.
 """
 import logging
 from pathlib import Path
@@ -11,152 +15,186 @@ import numpy as np
 import pandas as pd
 
 from .config import (
-    COL_CATEGORICA, COLS_NUMERICAS, ETIQUETAS_RIESGO, OBJETIVO, POLIGONO_APROX,
-    RUTA_POLIGONO_IGAC, RUTA_SISMOS_BRUTO, RUTA_SISMOS_LIMPIO, SEMILLA, TIPOS_SUELO,
-    VARIABLES,
+    ANIO_ACTUAL, ANIO_MAX_ENTRADA, ANIO_MIN, BUCARAMANGA, COLS_NUMERICAS, COL_CATEGORICA,
+    ETIQUETAS_RIESGO, OBJETIVO, RUTA_MUN_FEATURES, RUTA_MUNICIPIOS, RUTA_PANEL, RUTA_POLIGONO_IGAC,
+    RUTA_SISMOS_BRUTO, RUTA_SISMOS_LIMPIO, RUTA_SITIOS, UMBRAL_ALTO, UMBRAL_MEDIO, VARIABLES,
 )
-from .data_generation import generar_dataset, guardar_dataset_bruto
 
 log = logging.getLogger(__name__)
-
-# Nombres típicos del catálogo del SGC -> nombres de nuestro esquema
-EQUIVALENCIAS_SGC = {
-    "Latitud(grados)": "latitud", "Longitud(grados)": "longitud",
-    "Profundidad(Km)": "profundidad_km", "Magnitud": "magnitud",
-    "RMS(Seg)": "rms", "GAP": "gap_azimutal", "FASES": "fases_asociadas",
-    "lat": "latitud", "lon": "longitud", "mag": "magnitud", "depth": "profundidad_km",
-}
+CRS_M = "EPSG:3116"  # metros (MAGNA-SIRGAS Colombia Bogotá)
 
 
 # ------------------------------------------------------------------ Carga
 def cargar_bruto(ruta: Path = RUTA_SISMOS_BRUTO) -> pd.DataFrame:
-    """Lee el CSV bruto; si no existe genera uno simulado para poder trabajar."""
+    """Lee el catálogo SGC; si no existe lo descarga (requiere internet)."""
     if not Path(ruta).exists():
-        log.warning("No se encontró %s; se genera un dataset simulado.", ruta)
-        return guardar_dataset_bruto(Path(ruta))
-    df = pd.read_csv(ruta)
-    return df.rename(columns=EQUIVALENCIAS_SGC)
+        from .real_data import descargar_catalogo_sgc
+        log.warning("No existe %s; se descarga del SGC.", ruta)
+        return descargar_catalogo_sgc()
+    return pd.read_csv(ruta)
 
 
-def cargar_poligono_santander() -> gpd.GeoDataFrame:
-    """Polígono oficial (IGAC) si está en data/, de lo contrario el contorno aproximado."""
-    try:
-        if RUTA_POLIGONO_IGAC.exists():
-            gdf = gpd.read_file(RUTA_POLIGONO_IGAC).to_crs(4326)
-            return gdf[["geometry"]].dissolve().reset_index(drop=True)
-    except Exception as exc:  # archivo corrupto, CRS ausente, etc.
-        log.warning("No se pudo leer el polígono IGAC (%s); se usa el aproximado.", exc)
-    return gpd.GeoDataFrame(geometry=[POLIGONO_APROX], crs="EPSG:4326")
+def cargar_municipios() -> gpd.GeoDataFrame:
+    """Municipios de Santander (polígonos MGN-DANE, población DANE 2025); se construyen si faltan."""
+    if not RUTA_MUNICIPIOS.exists():
+        from .real_data import construir_municipios
+        construir_municipios()
+    return gpd.read_file(RUTA_MUNICIPIOS).to_crs(4326)
 
 
-# ------------------------------------------------------------------ Pasos del ETL
-def filtrar_santander(df: pd.DataFrame) -> pd.DataFrame:
-    """Conserva solo los eventos cuyo punto (lon, lat) cae dentro del polígono de Santander."""
-    df = df.dropna(subset=["latitud", "longitud"]).copy()
-    puntos = gpd.GeoDataFrame(
-        df, geometry=gpd.points_from_xy(df["longitud"], df["latitud"]), crs="EPSG:4326"
-    )
-    poligono = cargar_poligono_santander()
-    dentro = gpd.sjoin(puntos, poligono, how="inner", predicate="within")
-    # sjoin puede duplicar filas si el polígono tuviera varias partes: se deduplica por índice
+def cargar_sitios() -> pd.DataFrame:
+    """Variables de terreno por celda de ~2 km; se construyen con las fuentes reales si faltan."""
+    if not RUTA_SITIOS.exists():
+        from .real_data import construir_sitios
+        log.warning("No existe %s; se construye (tarda varios minutos).", RUTA_SITIOS)
+        return construir_sitios()
+    return pd.read_csv(RUTA_SITIOS)
+
+
+# ------------------------------------------------------------------ 1-3. Catálogo limpio
+def filtrar_santander(df: pd.DataFrame, municipios: gpd.GeoDataFrame) -> pd.DataFrame:
+    """Cruce espacial: conserva solo eventos cuyo punto (lon, lat) cae dentro de un municipio
+    de Santander y les asigna el municipio (DANE) donde ocurrieron."""
+    puntos = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df["longitud"], df["latitud"]), crs=4326)
+    dentro = gpd.sjoin(puntos, municipios[["municipio", "geometry"]].rename(columns={"municipio": "municipio_dane"}),
+                       how="inner", predicate="within")
     dentro = dentro[~dentro.index.duplicated()]
-    return pd.DataFrame(dentro.drop(columns=["geometry", "index_right"], errors="ignore"))
+    return pd.DataFrame(dentro.drop(columns=["geometry", "index_right"]))
 
 
-def imputar_nulos(df: pd.DataFrame, referencia: pd.DataFrame) -> pd.DataFrame:
-    """Mediana para numéricas y moda para categóricas.
+def limpiar_catalogo() -> tuple[pd.DataFrame, dict]:
+    bruto = cargar_bruto()
+    informe = {"filas_brutas": len(bruto)}
+    bruto["magnitud"] = bruto["magnitud_mw"].fillna(bruto["magnitud_ml"])  # Mw es más fiable cuando existe
+    bruto = bruto.dropna(subset=["magnitud", "latitud", "longitud", "fecha"])
+    bruto = bruto.drop_duplicates(subset=["fecha", "hora_utc", "latitud", "longitud"])
+    informe["descartados_sin_magnitud_o_duplicados"] = informe["filas_brutas"] - len(bruto)
 
-    Si una columna llega vacía por completo (p. ej. un CSV del SGC sin datos de suelo),
-    se toma la estadística de `referencia` (dataset simulado) en lugar de quedar en NaN.
-    """
-    df = df.copy()
-    for col in COLS_NUMERICAS:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-        mediana = df[col].median()
-        if pd.isna(mediana):
-            mediana = pd.to_numeric(referencia[col], errors="coerce").median()
-        df[col] = df[col].fillna(mediana)
-    moda = df[COL_CATEGORICA].mode()
-    moda = moda.iloc[0] if not moda.empty else referencia[COL_CATEGORICA].mode().iloc[0]
-    df[COL_CATEGORICA] = df[COL_CATEGORICA].where(df[COL_CATEGORICA].isin(TIPOS_SUELO), moda)
-    return df
+    dentro = filtrar_santander(bruto, cargar_municipios())
+    informe["descartados_fuera_santander"] = len(bruto) - len(dentro)
+
+    cols_imputar = ["profundidad_km", "rms", "gap_azimutal", "fases_asociadas"]
+    informe["nulos_imputados"] = int(dentro[cols_imputar].isna().sum().sum())
+    for c in cols_imputar:
+        dentro[c] = pd.to_numeric(dentro[c], errors="coerce")
+        dentro[c] = dentro[c].fillna(dentro[c].median())
+
+    dentro["anio"] = pd.to_datetime(dentro["fecha"], errors="coerce").dt.year
+    dentro = dentro.drop(columns=["municipio"], errors="ignore")  # el nombre del SGC se reemplaza por el del DANE
+    limpio = dentro.rename(columns={"municipio_dane": "municipio"})[
+        ["fecha", "hora_utc", "anio", "municipio", "latitud", "longitud", "profundidad_km", "magnitud",
+         "rms", "gap_azimutal", "fases_asociadas"]
+    ].dropna(subset=["anio"]).astype({"anio": int}).reset_index(drop=True)
+    informe["filas_limpias"] = len(limpio)
+    return limpio, informe
 
 
-def calcular_categoria_riesgo(df: pd.DataFrame, seed: int = SEMILLA) -> pd.Series:
-    """Índice compuesto amenaza × vulnerabilidad × exposición -> clases 1..4.
-
-    Criterio (pesos justificados por práctica común en microzonificación sísmica):
-      amenaza     : magnitud, PGA, cercanía a falla, poca profundidad
-      sitio       : suelo blando, pendiente y nivel freático somero
-      exposición  : densidad poblacional, antigüedad de construcciones, infraestructura crítica
-    Se añade ruido gaussiano pequeño (incertidumbre del dato) y se corta por cuantiles
-    (≈40 % Bajo, 35 % Medio, 18 % Alto, 7 % Extremo) para tener clases con sentido.
-    """
-    rng = np.random.default_rng(seed)
-    peso_suelo = df[COL_CATEGORICA].map({
-        "Roca": 0.0, "Suelo duro": 0.25, "Suelo intermedio": 0.55,
-        "Suelo blando": 0.9, "Aluvial": 1.0,
-    }).astype(float)
-
-    amenaza = (
-        0.45 * ((df["magnitud"] - 2) / 4.8).clip(0, 1)
-        + 0.25 * (df["PGA_historico"] / 0.5).clip(0, 1)
-        + 0.20 * np.exp(-df["distancia_falla_km"] / 30)
-        + 0.10 * np.exp(-df["profundidad_km"] / 60)
+# ------------------------------------------------------------------ 4. Variables territoriales por municipio
+def construir_features_municipio(municipios: gpd.GeoDataFrame, sitios: pd.DataFrame) -> pd.DataFrame:
+    """Resume por municipio las celdas de terreno y suma las variables DANE (población, área)."""
+    blando = sitios["tipo_suelo"].str.startswith(("D", "E"))
+    agg = sitios.assign(suelo_blando=blando).groupby("municipio").agg(
+        PGA_medio=("PGA_historico", "mean"),
+        elevacion_media=("elevacion", "mean"),
+        pendiente_media=("pendiente_terreno", "mean"),
+        distancia_falla_km=("distancia_falla_km", "mean"),
+        distancia_cuerpos_agua=("distancia_cuerpos_agua", "mean"),
+        pct_suelo_blando=("suelo_blando", "mean"),
+        suelo_predominante=("tipo_suelo", lambda s: s.mode().iloc[0]),
     )
-    sitio = (
-        0.60 * peso_suelo
-        + 0.20 * (df["pendiente_terreno"] / 40).clip(0, 1)
-        + 0.20 * np.exp(-df["nivel_freatico"] / 10)
+    m = municipios.copy()
+    cen = m.geometry.representative_point()
+    m["latitud"], m["longitud"] = cen.y, cen.x
+    bu = gpd.GeoSeries(gpd.points_from_xy([BUCARAMANGA[1]], [BUCARAMANGA[0]]), crs=4326).to_crs(CRS_M).iloc[0]
+    m["distancia_bucaramanga_km"] = cen.to_crs(CRS_M).distance(bu) / 1000
+    base = pd.DataFrame(m.drop(columns="geometry")).set_index("municipio")
+    out = base.join(agg, how="left")
+    # Un municipio sin celda propia (p. ej. muy pequeño) hereda la mediana del departamento
+    for c in out.columns:
+        if out[c].isna().any():
+            out[c] = out[c].fillna(out[c].median() if out[c].dtype != object else out[c].mode().iloc[0])
+    return out.reset_index()
+
+
+# ------------------------------------------------------------------ 5. Panel municipio-año
+def _historial_anual(eventos: pd.DataFrame, municipios: list[str], anios: range) -> pd.DataFrame:
+    """Variables sísmicas de cada municipio y año (todas calculadas con eventos de ese año)."""
+    e = eventos.copy()
+    e["m3"] = e["magnitud"] >= 3
+    e["someros"] = e["profundidad_km"] < 30
+    e["energia"] = 10 ** (1.5 * e["magnitud"] + 4.8)  # energía sísmica (J), Gutenberg-Richter
+    g = e.groupby(["municipio", "anio"]).agg(
+        n_sismos=("magnitud", "size"), n_sismos_m3=("m3", "sum"), mag_media=("magnitud", "mean"),
+        mag_max=("magnitud", "max"), profundidad_media=("profundidad_km", "mean"), frac_someros=("someros", "mean"),
+        rms_medio=("rms", "mean"), gap_medio=("gap_azimutal", "mean"), fases_medias=("fases_asociadas", "mean"),
+        energia=("energia", "sum"),
     )
-    exposicion = (
-        0.50 * (np.log1p(df["densidad_poblacional"]) / np.log1p(5000)).clip(0, 1)
-        + 0.30 * (df["antiguedad_construcciones"] / 100).clip(0, 1)
-        + 0.20 * (df["infraestructura_critica"] / 6).clip(0, 1)
-    )
-    puntaje = 0.50 * amenaza + 0.20 * sitio + 0.30 * exposicion
-    puntaje = puntaje + rng.normal(0, 0.015, len(df))
-    cortes = puntaje.quantile([0.40, 0.75, 0.93]).to_numpy()
-    return pd.Series(np.digitize(puntaje, cortes) + 1, index=df.index, name=OBJETIVO)
+    malla = pd.MultiIndex.from_product([municipios, anios], names=["municipio", "anio"])
+    g = g.reindex(malla)
+    g["n_sismos"] = g["n_sismos"].fillna(0)
+    g["n_sismos_m3"] = g["n_sismos_m3"].fillna(0)
+    g["energia_log10"] = np.log10(g["energia"].fillna(0) + 1)
+    return g.drop(columns="energia").reset_index()
+
+
+def construir_panel(eventos: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
+    """Panel municipio-año con variables hasta t y etiqueta del año t+1."""
+    municipios = sorted(feats["municipio"])
+    h = _historial_anual(eventos, municipios, range(ANIO_MIN - 1, ANIO_ACTUAL + 2))
+    h = h.sort_values(["municipio", "anio"])
+    gr = h.groupby("municipio")
+
+    # Variables de memoria: solo miran años ≤ t
+    h["n_m3_prev3"] = gr["n_sismos_m3"].transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean())
+    h["mag_max_prev3"] = gr["mag_max"].transform(lambda s: s.rolling(3, min_periods=1).max())
+    h["tendencia_m3"] = gr["n_sismos_m3"].diff()
+    h["anios_desde_m4"] = gr["mag_max"].transform(_anios_desde_m4)
+    # Etiqueta: magnitud máxima del año SIGUIENTE (no se usa como entrada)
+    h["mag_max_siguiente"] = gr["mag_max"].shift(-1)
+    h["CATEGORIA_RIESGO_NUM"] = np.digitize(h["mag_max_siguiente"].fillna(0), [UMBRAL_MEDIO, UMBRAL_ALTO]) + 1
+
+    panel = h[(h["anio"] >= ANIO_MIN) & (h["anio"] <= ANIO_ACTUAL)].merge(feats, on="municipio", how="left")
+    # Huecos: años sin sismos -> no hubo magnitud/profundidad que promediar; se imputa con la mediana global
+    for c in ["mag_media", "mag_max", "profundidad_media", "frac_someros", "rms_medio", "gap_medio", "fases_medias",
+              "mag_max_prev3", "tendencia_m3", "n_m3_prev3"]:
+        panel[c] = panel[c].fillna(panel[c].median())
+    panel[OBJETIVO] = panel["CATEGORIA_RIESGO_NUM"].astype(int)
+    panel["riesgo_etiqueta"] = panel[OBJETIVO].map(ETIQUETAS_RIESGO)
+    # El último año (2017) no tiene etiqueta (2018 incompleto): se conserva como estado actual
+    panel.loc[panel["anio"] > ANIO_MAX_ENTRADA, [OBJETIVO, "riesgo_etiqueta", "mag_max_siguiente"]] = np.nan
+    return panel.drop(columns="CATEGORIA_RIESGO_NUM")
+
+
+def _anios_desde_m4(mag_max: pd.Series) -> pd.Series:
+    """Años transcurridos desde el último año con M≥4 (tope 30) usando solo información ≤ t."""
+    out, ultimo = [], None
+    for k, m in enumerate(mag_max.to_numpy()):
+        if not np.isnan(m) and m >= 4:
+            ultimo = k
+        out.append(30 if ultimo is None else min(k - ultimo, 30))
+    return pd.Series(out, index=mag_max.index)
 
 
 # ------------------------------------------------------------------ Orquestador
-def ejecutar_etl(ruta_bruto: Path = RUTA_SISMOS_BRUTO, ruta_salida: Path = RUTA_SISMOS_LIMPIO,
-                 guardar: bool = True) -> tuple[pd.DataFrame, dict]:
-    """Pipeline completo. Devuelve (dataframe limpio, informe con conteos de cada paso)."""
-    bruto = cargar_bruto(ruta_bruto)
-    informe = {"filas_brutas": len(bruto), "nulos_antes": int(bruto.isna().sum().sum())}
-
-    # Columnas ausentes en el CSV (p. ej. catálogo real del SGC sin capas IGAC/DANE) quedan
-    # como NaN y se completan con la referencia simulada durante la imputación
-    for col in VARIABLES:
-        if col not in bruto.columns:
-            bruto[col] = np.nan
-    informe["columnas_completadas"] = [c for c in VARIABLES if bruto[c].isna().all()]
-
-    filtrado = filtrar_santander(bruto)
-    informe["filas_fuera_santander"] = len(bruto) - len(filtrado)
-
-    referencia = generar_dataset(500)
-    limpio = imputar_nulos(filtrado, referencia)
-
-    if OBJETIVO not in limpio.columns or limpio[OBJETIVO].isna().any():
-        limpio[OBJETIVO] = calcular_categoria_riesgo(limpio)
-    limpio[OBJETIVO] = limpio[OBJETIVO].astype(int)
-
-    limpio = limpio[VARIABLES + [OBJETIVO]].reset_index(drop=True)
-    limpio["riesgo_etiqueta"] = limpio[OBJETIVO].map(ETIQUETAS_RIESGO)
-    informe["filas_limpias"] = len(limpio)
-    informe["nulos_despues"] = int(limpio.isna().sum().sum())
-
+def ejecutar_etl(guardar: bool = True) -> tuple[pd.DataFrame, dict]:
+    """Pipeline completo. Devuelve (panel municipio-año, informe con conteos de cada paso)."""
+    limpio, informe = limpiar_catalogo()
+    municipios = cargar_municipios()
+    feats = construir_features_municipio(municipios, cargar_sitios())
+    panel = construir_panel(limpio, feats)
+    informe["filas_panel"] = len(panel)
+    informe["municipios"] = int(feats["municipio"].nunique())
+    informe["nulos_panel"] = int(panel[VARIABLES].isna().sum().sum())
     if guardar:
-        Path(ruta_salida).parent.mkdir(parents=True, exist_ok=True)
-        limpio.to_csv(ruta_salida, index=False)
-    return limpio, informe
+        RUTA_SISMOS_LIMPIO.parent.mkdir(parents=True, exist_ok=True)
+        limpio.to_csv(RUTA_SISMOS_LIMPIO, index=False)
+        feats.to_csv(RUTA_MUN_FEATURES, index=False)
+        panel.to_csv(RUTA_PANEL, index=False)
+    return panel, informe
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    df, info = ejecutar_etl()
+    p, info = ejecutar_etl()
     print(info)
-    print(df[OBJETIVO].value_counts().sort_index())
+    print(p[OBJETIVO].value_counts(dropna=False).sort_index())

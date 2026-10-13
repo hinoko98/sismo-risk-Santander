@@ -4,3 +4,5 @@ __pycache__/
 venv/
 .streamlit/secrets.toml
 models/*.pkl
+data/raw/
+data/santander_limpio.csv

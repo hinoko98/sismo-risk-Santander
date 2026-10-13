@@ -1,30 +1,40 @@
 # 🌋 Sismo-Risk Santander
 
 Plataforma web para la gestión del riesgo sísmico en Santander — Hackathon CIAI UTSmart 2026.
+Todos los datos son **reales** (SGC, DANE, IGAC/MGN, GEM, OpenStreetMap, SRTM); solo el costo de evaluación del reto de refuerzo es simulado, como permite el reto.
 
 ## Ejecución rápida
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
-Si `data/` o `models/` están vacíos, la app genera los datos, ejecuta el ETL y entrena el modelo sola.
+La carpeta `data/` incluye los datos ya descargados. Si falta algo, la app lo regenera (requiere internet):
+`python -m src.real_data` (descarga) → `python -m src.data_processing` (ETL) → `python -m src.model_training` → `python -m src.reinforcement`.
 
-## Estructura
-| Ruta | Misión | Contenido |
+## Los tres retos
+| Reto | Módulo | Qué hace |
 |---|---|---|
-| `src/data_processing.py` | 1 · Básico | Carga, imputación (mediana/moda), filtro espacial con geopandas, cálculo de `CATEGORIA_RIESGO` |
-| `src/model_training.py` | 2 · Medio | One-Hot de `tipo_suelo`, split 80/20, `RandomForestClassifier(class_weight='balanced')`, CV estratificada, métricas, `models/sismo_rf_model.pkl` |
-| `app.py` | 3 · Avanzado | Dashboard con 3 pestañas (EDA, mapa folium, simulador en sidebar), caché y manejo de errores |
-| `src/data_generation.py` | — | Dataset sintético (SGC + IGAC + DANE) con Nido de Bucaramanga |
-| `src/config.py` | — | Rutas, variables, polígono y falla de referencia |
+| Básico · supervisado | `src/data_processing.py`, `src/model_training.py` | ETL con geopandas, imputación, panel municipio-año, Random Forest (`class_weight='balanced'`, One-Hot, split temporal 80/20, CV de series de tiempo) |
+| Medio · no supervisado | `src/unsupervised.py` | K-Means (k configurable) + PCA sobre 22 variables agregadas por municipio |
+| Avanzado · refuerzo | `src/reinforcement.py` | Q-learning: priorizar evaluaciones municipales con presupuesto limitado |
 
-Pasos por consola: `python -m src.data_processing` y `python -m src.model_training`.
+## Etiqueta (reproducible y sin fuga de datos)
+Unidad: **municipio-año**. Las variables de entrada usan información hasta el año *t*; la categoría es la **magnitud máxima registrada en el año *t+1***:
+**Bajo** < 3,0 · **Medio** 3,0–<4,0 · **Alto** ≥ 4,0. Ninguna entrada contiene datos del año siguiente. La evaluación es temporal (entrena con 1994–2011, prueba con 2012–2016) y se compara con líneas base (clase mayoritaria y persistencia).
 
-## ⚠️ Datos
-Los datos incluidos son **simulados**, y la categoría de riesgo es un índice calculado, por lo que las métricas del modelo miden
-cuánto reproduce ese índice, no el riesgo real. Para usar datos reales: pon el catálogo en `data/sismos_SGC.csv`
-(columnas del SGC se renombran automáticamente; las variables faltantes se imputan) y, opcionalmente, el polígono oficial
-del IGAC en `data/santander_poligono.geojson`. Borra `data/santander_limpio.csv` y `models/*.pkl` para regenerarlos.
-El contorno de Santander por defecto es una **aproximación**.
+## Fuentes
+| Variable(s) | Fuente |
+|---|---|
+| Actividad sísmica (frecuencia, magnitud, profundidad, RMS, GAP, fases) | [SGC Consulta Experta](https://bdrsnc.sgc.gov.co/paginas1/catalogo/Consulta_Experta/consultaexperta_2.php) — jun-1993 a mar-2018 (el servicio no devuelve fechas posteriores) |
+| PGA (475 años, roca) | [SGC Amenaza sísmica 2020](https://amenazasismica.sgc.gov.co/) |
+| Población, área, límites | [DANE](https://www.dane.gov.co/index.php/estadisticas-por-tema/demografia-y-poblacion/proyecciones-de-poblacion) (proyecciones 2025 y Marco Geoestadístico vía geoBoundaries); [IGAC](https://www.igac.gov.co/datos-abiertos/datos-abiertos-geoespaciales) como referencia |
+| Elevación y pendiente | SRTM 90 m (OpenTopoData) |
+| Distancia a fallas | GEM Global Active Faults |
+| Distancia a cuerpos de agua | OpenStreetMap |
 
-Fuentes: [SGC](https://www.sgc.gov.co/catalogo) · [Catálogo sísmico](https://catalogosismico.sgc.gov.co/visor/) · [DANE](https://www.dane.gov.co/index.php/estadisticas-por-tema/demografia-y-poblacion/proyecciones-de-poblacion) · [IGAC](https://www.igac.gov.co/datos-abiertos/datos-abiertos-geoespaciales) · [Amenaza sísmica](https://amenazasismica.sgc.gov.co/)
+## Limitaciones conocidas
+- `suelo_predominante` es una **estimación** (clase NEHRP con el proxy topográfico de Wald & Allen 2007), no un mapa de suelos; conviene verificar los umbrales.
+- Quedaron fuera por no tener fuente abierta descargable: nivel freático y antigüedad de construcciones. **Pendiente:** infraestructura crítica (OSM/Overpass estaba saturado).
+- Falta el municipio de Jordán (no se halló su polígono en la capa de límites).
+- La categoría mide amenaza sísmica próxima, no daños; la exposición (población) entra en el reto de refuerzo.
+- El costo y la escala de beneficio del agente de refuerzo son **simulados** (unidades relativas).

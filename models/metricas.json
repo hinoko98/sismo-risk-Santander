@@ -1,0 +1,61 @@
+{
+  "accuracy": 0.7858,
+  "precision": 0.7847,
+  "recall": 0.7858,
+  "f1_score": 0.7852,
+  "cv_f1_media": 0.7798,
+  "cv_f1_desv": 0.0091,
+  "n_train": 2315,
+  "n_test": 579,
+  "importancias": {
+    "PGA_historico": 0.1904,
+    "distancia_falla_km": 0.0956,
+    "magnitud": 0.0933,
+    "densidad_poblacional": 0.077,
+    "longitud": 0.0737,
+    "distancia_zona_urbana": 0.0367,
+    "latitud": 0.034,
+    "profundidad_km": 0.0327,
+    "antiguedad_construcciones": 0.0326,
+    "pendiente_terreno": 0.031,
+    "densidad_historica_5km": 0.0305,
+    "tipo_suelo_Roca": 0.0288,
+    "fases_asociadas": 0.0288,
+    "nivel_freatico": 0.0279,
+    "tipo_suelo_Suelo blando": 0.0263,
+    "gap_azimutal": 0.0252,
+    "elevacion": 0.0244,
+    "distancia_cuerpos_agua": 0.0239,
+    "rms": 0.0225,
+    "tipo_suelo_Suelo duro": 0.0218,
+    "tipo_suelo_Aluvial": 0.0166,
+    "tipo_suelo_Suelo intermedio": 0.0139,
+    "infraestructura_critica": 0.0122
+  },
+  "matriz_confusion": {
+    "Alto": {
+      "Alto": 68,
+      "Bajo": 0,
+      "Extremo": 13,
+      "Medio": 21
+    },
+    "Bajo": {
+      "Alto": 2,
+      "Bajo": 206,
+      "Extremo": 0,
+      "Medio": 27
+    },
+    "Extremo": {
+      "Alto": 11,
+      "Bajo": 0,
+      "Extremo": 27,
+      "Medio": 0
+    },
+    "Medio": {
+      "Alto": 23,
+      "Bajo": 26,
+      "Extremo": 1,
+      "Medio": 154
+    }
+  }
+}

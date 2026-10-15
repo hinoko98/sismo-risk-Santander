@@ -1,0 +1,127 @@
+{
+  "supervisado": {
+    "accuracy": 0.8333,
+    "f1_macro": 0.6486,
+    "f1_score": 0.816,
+    "cv_f1_media": 0.7362,
+    "cv_f1_desv": 0.0496,
+    "baseline_mayoritaria_accuracy": 0.7829,
+    "baseline_persistencia_accuracy": 0.7694,
+    "baseline_persistencia_f1": 0.7669,
+    "anios_train": "1994–2018",
+    "anios_test": "2019–2024",
+    "n_train": 2150,
+    "n_test": 516,
+    "por_clase": {
+      "Bajo": {
+        "recall": 0.875,
+        "precision": 0.953
+      },
+      "Medio": {
+        "recall": 0.6042,
+        "precision": 0.3333
+      },
+      "Alto": {
+        "recall": 0.5714,
+        "precision": 0.64
+      }
+    },
+    "matriz_confusion": {
+      "Alto": {
+        "Alto": 16,
+        "Bajo": 5,
+        "Medio": 7
+      },
+      "Bajo": {
+        "Alto": 4,
+        "Bajo": 385,
+        "Medio": 51
+      },
+      "Medio": {
+        "Alto": 5,
+        "Bajo": 14,
+        "Medio": 29
+      }
+    },
+    "importancias": {
+      "n_m3_prev3": 0.1014,
+      "energia_log10": 0.098,
+      "n_sismos_m3": 0.0663,
+      "mag_max_prev3": 0.0561,
+      "mag_max": 0.0477,
+      "anios_desde_m4": 0.0448,
+      "profundidad_media": 0.0432,
+      "n_sismos": 0.0404,
+      "area_km2": 0.0361,
+      "mag_media": 0.0343,
+      "gap_medio": 0.0327,
+      "fases_medias": 0.0327,
+      "error_prof_medio": 0.0315,
+      "rms_medio": 0.0301,
+      "error_lat_medio": 0.0299,
+      "longitud": 0.029,
+      "distancia_bucaramanga_km": 0.0281,
+      "poblacion": 0.0264,
+      "elevacion_media": 0.0253,
+      "PGA_medio": 0.0243,
+      "latitud": 0.0234,
+      "distancia_falla_km": 0.0209,
+      "distancia_cuerpos_agua": 0.0206,
+      "tendencia_m3": 0.0186,
+      "pendiente_media": 0.0181,
+      "densidad_poblacional": 0.0172,
+      "frac_someros": 0.0153,
+      "suelo_predominante_B - Roca": 0.0029,
+      "pct_suelo_blando": 0.0024,
+      "suelo_predominante_C - Suelo denso / roca blanda": 0.0022,
+      "suelo_predominante_D - Suelo rígido": 0.0,
+      "suelo_predominante_E - Suelo blando": 0.0
+    }
+  },
+  "no_supervisado": {
+    "k": 3,
+    "silueta": 0.2146,
+    "davies_bouldin": 1.6539,
+    "ari_medio_20_semillas": 0.7339,
+    "silueta_por_k": {
+      "2": 0.211,
+      "3": 0.2146,
+      "4": 0.2496,
+      "5": 0.2502,
+      "6": 0.2689
+    }
+  },
+  "refuerzo": {
+    "comparacion": [
+      {
+        "Política": "Agente RL (Q-learning)",
+        "Recompensa neta media/año": 43.96,
+        "Beneficio medio/año": 52.59,
+        "Costo medio/año": 8.63,
+        "% municipios Alto evaluados": 12.0
+      },
+      {
+        "Política": "Aleatoria (30 %)",
+        "Recompensa neta media/año": -11.93,
+        "Beneficio medio/año": 17.03,
+        "Costo medio/año": 28.95,
+        "% municipios Alto evaluados": 7.73
+      },
+      {
+        "Política": "Regla: actividad alta y población ≥ media",
+        "Recompensa neta media/año": 9.33,
+        "Beneficio medio/año": 38.05,
+        "Costo medio/año": 28.72,
+        "% municipios Alto evaluados": 36.4
+      },
+      {
+        "Política": "Evaluar todo mientras alcance",
+        "Recompensa neta media/año": -6.71,
+        "Beneficio medio/año": 22.39,
+        "Costo medio/año": 29.1,
+        "% municipios Alto evaluados": 8.93
+      }
+    ],
+    "recompensa_final_entrenamiento": 84.36
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "configuraciones": [
+    {
+      "coordenadas": true,
+      "log1p": false,
+      "silueta": 0.215,
+      "davies_bouldin": 1.654,
+      "estabilidad_ari": 0.584
+    },
+    {
+      "coordenadas": true,
+      "log1p": true,
+      "silueta": 0.219,
+      "davies_bouldin": 1.577,
+      "estabilidad_ari": 0.691
+    },
+    {
+      "coordenadas": false,
+      "log1p": false,
+      "silueta": 0.202,
+      "davies_bouldin": 1.684,
+      "estabilidad_ari": 0.457
+    },
+    {
+      "coordenadas": false,
+      "log1p": true,
+      "silueta": 0.212,
+      "davies_bouldin": 1.615,
+      "estabilidad_ari": 0.643
+    }
+  ],
+  "ari_con_vs_sin_coordenadas": 0.354,
+  "peso_coordenadas_en_pca": 0.116,
+  "metodos": [
+    {
+      "metodo": "K-Means",
+      "silueta": 0.212,
+      "davies_bouldin": 1.615,
+      "estabilidad_ari": 0.643,
+      "tamanos": [
+        48,
+        25,
+        13
+      ]
+    },
+    {
+      "metodo": "Mezcla gaussiana",
+      "silueta": 0.215,
+      "davies_bouldin": 1.582,
+      "estabilidad_ari": 0.896,
+      "tamanos": [
+        51,
+        25,
+        10
+      ]
+    },
+    {
+      "metodo": "Aglomerativo (Ward)",
+      "silueta": 0.197,
+      "davies_bouldin": 1.6,
+      "estabilidad_ari": 0.421,
+      "tamanos": [
+        51,
+        29,
+        6
+      ]
+    }
+  ],
+  "elegido": {
+    "metodo": "Mezcla gaussiana",
+    "coordenadas": false,
+    "usa_coordenadas": false,
+    "silueta_por_k": {
+      "2": 0.222,
+      "3": 0.215,
+      "4": 0.224,
+      "5": 0.192,
+      "6": 0.203
+    },
+    "silueta_k": 0.215,
+    "davies_bouldin": 1.582,
+    "estabilidad_ari": 0.896,
+    "varianza_explicada": [
+      0.275,
+      0.214
+    ],
+    "variables_mas_influyentes": {
+      "elevacion_media": 0.55,
+      "pendiente_media": 0.514,
+      "frecuencia_anual_m3": 0.501,
+      "distancia_bucaramanga_km": 0.476,
+      "area_km2": 0.461,
+      "energia_total_log10": 0.457
+    },
+    "n_variables": 19
+  },
+  "perfiles": {
+    "Alto": "25 municipios con sismos profundos (~132 km), del tipo del Nido de Bucaramanga, muy frecuentes (mediana 2,1 sismos M≥3 por año), magnitud máxima mediana 5,1, amenaza oficial alta (0,25 g), población mediana (mediana 10.278 hab.), cerca de fallas activas, a ~44 km de Bucaramanga.",
+    "Bajo": "51 municipios con sismos profundos (~112 km), del tipo del Nido de Bucaramanga, poco frecuentes (mediana 0,1 sismos M≥3 por año), magnitud máxima mediana 3,6, amenaza oficial baja (0,23 g), población mediana (mediana 4.764 hab.), lejos de fallas activas.",
+    "Medio": "10 municipios con sismos de profundidad intermedia (~78 km), muy frecuentes (mediana 0,9 sismos M≥3 por año), magnitud máxima mediana 4,5, amenaza oficial alta (0,26 g), los más poblados (mediana 30.474 hab.), cerca de fallas activas."
+  }
+}

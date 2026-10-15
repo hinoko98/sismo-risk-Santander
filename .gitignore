@@ -1,8 +1,8 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 .venv/
 venv/
-.streamlit/secrets.toml
 models/*.pkl
 data/raw/
 data/santander_limpio.csv
+data/eventos_en_vivo.csv

@@ -20,7 +20,9 @@ RUTA_MUN_FEATURES = DIR_DATOS / "municipios_features.csv"       # variables est�
 RUTA_PANEL = DIR_DATOS / "panel_municipio_anio.csv"             # dataset supervisado (municipio-año)
 RUTA_MODELO = DIR_MODELOS / "sismo_rf_model.pkl"
 RUTA_METRICAS = DIR_MODELOS / "metricas.json"
+RUTA_METRICAS_V1 = DIR_MODELOS / "metricas_v1.json"             # línea base congelada antes de la v2
 RUTA_AGENTE_RL = DIR_MODELOS / "agente_rl.pkl"
+RUTA_EVENTOS_VIVO = DIR_DATOS / "eventos_en_vivo.csv"           # eventos nuevos detectados en vivo (SGC)
 RUTA_LOGO = DIR_ASSETS / "logo.png"
 RUTA_ICONO = DIR_ASSETS / "icono.png"
 
